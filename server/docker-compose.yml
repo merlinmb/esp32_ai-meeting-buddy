@@ -9,17 +9,17 @@ services:
     env_file:
       - .env
     environment:
-      # Overrides the .env default so transcripts land in the named volume
-      # below rather than a path relative to wherever the process runs.
       - OUTPUT_DIR=/app/transcripts
     volumes:
-      # Named volumes, not bind mounts: when this is deployed to a remote
-      # Docker host over an SSH context (see deploy.sh), bind-mount paths
-      # resolve on the DAEMON's filesystem, not this machine's - named
-      # volumes sidestep that ambiguity. Use `./deploy.sh pull-transcripts`
-      # to copy finished transcripts back to your laptop.
       - transcripts_data:/app/transcripts
-      - whisper_cache:/root/.cache/huggingface   # avoids re-downloading the whisper model on every rebuild
+      - whisper_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   transcripts_data:

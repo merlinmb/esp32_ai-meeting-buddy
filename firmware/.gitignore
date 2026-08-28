@@ -6,3 +6,15 @@
 .vscode/launch.json
 .vscode/ipch
 compile_commands.json
+
+config.h
+src/config.h
+
+firmware/src/config.h
+firmware/src/config.h
+
+venv
+server/venv
+server/venv/*
+server/__pycache__
+server/.env

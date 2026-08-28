@@ -1,0 +1,703 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Meeting Buddy</title>
+<style>
+  :root {
+    --bg: #0a0b10;
+    --bg-alt: #0f1119;
+    --panel: #14161f;
+    --panel-2: #191c27;
+    --border: #262a38;
+    --border-soft: #1e212c;
+    --text: #eef0f6;
+    --text-dim: #9aa1b5;
+    --text-faint: #676e82;
+    --accent: #8b7bff;
+    --accent-2: #5ee6d8;
+    --accent-glow: rgba(139, 123, 255, 0.35);
+    --ok: #3fd694;
+    --warn: #ffb454;
+    --err: #ff5c72;
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(139, 123, 255, 0.16), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(94, 230, 216, 0.10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 100vh;
+  }
+
+  /* ---------- Sidebar ---------- */
+  aside {
+    background: var(--bg-alt);
+    border-right: 1px solid var(--border-soft);
+    padding: 22px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 8px 10px;
+  }
+  .brand .mark {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    box-shadow: 0 0 24px var(--accent-glow);
+    flex-shrink: 0;
+  }
+  .brand .name {
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: -0.01em;
+  }
+  .brand .name small {
+    display: block;
+    font-weight: 400;
+    color: var(--text-faint);
+    font-size: 0.7rem;
+    margin-top: 1px;
+  }
+
+  .sidebar-section-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+    padding: 0 8px;
+    margin-bottom: 2px;
+  }
+
+  .nav-search {
+    padding: 0 4px;
+  }
+  .nav-search input {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    outline: none;
+  }
+  .nav-search input:focus { border-color: var(--accent); }
+  .nav-search input::placeholder { color: var(--text-faint); }
+
+  .history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    overflow-y: auto;
+  }
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: 1px solid transparent;
+    background: transparent;
+  }
+  .history-item:hover { background: var(--panel); }
+  .history-item.active {
+    background: var(--panel-2);
+    border-color: var(--border);
+  }
+  .history-item .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot.received, .dot.transcribing, .dot.summarizing { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .dot.completed { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.failed { background: var(--err); box-shadow: 0 0 8px var(--err); }
+
+  .history-item .meta {
+    min-width: 0;
+    flex: 1;
+  }
+  .history-item .meta .n {
+    font-size: 0.82rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .history-item .meta .t {
+    font-size: 0.7rem;
+    color: var(--text-faint);
+  }
+
+  .sidebar-empty {
+    color: var(--text-faint);
+    font-size: 0.78rem;
+    padding: 10px;
+  }
+
+  /* ---------- Main ---------- */
+  main {
+    padding: 32px 40px 60px;
+    max-width: 1200px;
+  }
+
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+  }
+  .page-header h1 {
+    margin: 0 0 4px;
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .page-header .sub { color: var(--text-dim); font-size: 0.88rem; }
+
+  button.refresh {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  button.refresh:hover { border-color: var(--accent); color: var(--accent); }
+  button.refresh .spin { display: inline-block; transition: transform 0.5s; }
+  button.refresh.loading .spin { animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Hero metric cards ---------- */
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  .hero-card {
+    position: relative;
+    background: linear-gradient(160deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px 20px 18px;
+    overflow: hidden;
+  }
+  .hero-card::after {
+    content: "";
+    position: absolute;
+    top: -40%;
+    right: -20%;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--glow-color, var(--accent-glow)), transparent 70%);
+    pointer-events: none;
+  }
+  .hero-card .label {
+    font-size: 0.74rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 600;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .hero-card .icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+  }
+  .hero-card .value {
+    font-size: 2.1rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero-card .footnote {
+    margin-top: 8px;
+    font-size: 0.76rem;
+    color: var(--text-dim);
+  }
+
+  .hero-card.total { --glow-color: rgba(139, 123, 255, 0.35); }
+  .hero-card.total .icon { background: rgba(139, 123, 255, 0.16); color: var(--accent); }
+  .hero-card.completed { --glow-color: rgba(63, 214, 148, 0.30); }
+  .hero-card.completed .icon { background: rgba(63, 214, 148, 0.16); color: var(--ok); }
+  .hero-card.progress { --glow-color: rgba(255, 180, 84, 0.30); }
+  .hero-card.progress .icon { background: rgba(255, 180, 84, 0.16); color: var(--warn); }
+  .hero-card.failed { --glow-color: rgba(255, 92, 114, 0.30); }
+  .hero-card.failed .icon { background: rgba(255, 92, 114, 0.16); color: var(--err); }
+
+  /* ---------- Table panel ---------- */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .panel-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+  .panel-header .count { color: var(--text-faint); font-size: 0.8rem; }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border-soft);
+    font-weight: 600;
+  }
+  tbody tr {
+    border-bottom: 1px solid var(--border-soft);
+    transition: background 0.15s;
+    scroll-margin-top: 100px;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--panel-2); }
+  tbody tr.highlight { background: rgba(139, 123, 255, 0.10); }
+  td { padding: 13px 20px; font-size: 0.86rem; vertical-align: middle; }
+  td.name { font-weight: 500; }
+  td.name .sz { color: var(--text-faint); font-size: 0.74rem; font-weight: 400; margin-top: 2px; }
+  td.time { color: var(--text-dim); font-size: 0.8rem; white-space: nowrap; }
+  td.actions { white-space: nowrap; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 11px;
+    border-radius: 999px;
+    font-size: 0.73rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge.received, .badge.transcribing, .badge.summarizing {
+    background: rgba(255, 180, 84, 0.14); color: var(--warn);
+  }
+  .badge.completed { background: rgba(63, 214, 148, 0.14); color: var(--ok); }
+  .badge.failed { background: rgba(255, 92, 114, 0.14); color: var(--err); }
+
+  .btn {
+    display: inline-block;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+    cursor: pointer;
+    text-decoration: none;
+    margin-right: 6px;
+    font-weight: 500;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn.primary {
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--accent), #6f5fe0);
+    color: #fff;
+  }
+  .btn.primary:hover { filter: brightness(1.1); color: #fff; }
+  .btn.primary:disabled { background: var(--border); }
+
+  .empty { text-align: center; padding: 70px 20px; color: var(--text-dim); }
+  .empty .big { font-size: 2rem; margin-bottom: 10px; }
+
+  .error-note {
+    color: var(--err);
+    font-size: 0.76rem;
+    margin-top: 4px;
+    max-width: 300px;
+    white-space: normal;
+  }
+
+  /* ---------- Modal ---------- */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 5, 10, 0.68);
+    backdrop-filter: blur(3px);
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    z-index: 10;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    max-width: 760px;
+    width: 100%;
+    max-height: 82vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal header {
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal header h2 { margin: 0; font-size: 1.02rem; font-weight: 600; }
+  .modal .body {
+    padding: 20px 22px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #d7dae4;
+  }
+  .modal .close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.3rem;
+    cursor: pointer;
+    line-height: 1;
+    padding: 4px;
+  }
+  .modal .close:hover { color: var(--text); }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; height: auto; }
+    .hero-grid { grid-template-columns: repeat(2, 1fr); }
+    main { padding: 24px 18px 50px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <div class="mark">🎙️</div>
+      <div class="name">Meeting Buddy<small>Receiver console</small></div>
+    </div>
+
+    <div class="nav-search">
+      <input type="text" id="searchInput" placeholder="Search recordings...">
+    </div>
+
+    <div>
+      <div class="sidebar-section-label">History</div>
+      <div class="history-list" id="historyList"></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="page-header">
+      <div>
+        <h1>Dashboard</h1>
+        <div class="sub">Recordings received from the field unit, transcribed and cleaned up by Claude.</div>
+      </div>
+      <button class="refresh" id="refreshBtn"><span class="spin">⟳</span> Refresh</button>
+    </div>
+
+    <div class="hero-grid">
+      <div class="hero-card total">
+        <div class="label"><span class="icon">📥</span> Total received</div>
+        <div class="value" id="statTotal">–</div>
+        <div class="footnote" id="statLast">–</div>
+      </div>
+      <div class="hero-card completed">
+        <div class="label"><span class="icon">✓</span> Completed</div>
+        <div class="value" id="statCompleted">–</div>
+        <div class="footnote" id="statCompletedPct">–</div>
+      </div>
+      <div class="hero-card progress">
+        <div class="label"><span class="icon">⏳</span> In progress</div>
+        <div class="value" id="statProgress">–</div>
+        <div class="footnote">Transcribing or summarizing</div>
+      </div>
+      <div class="hero-card failed">
+        <div class="label"><span class="icon">⚠</span> Failed</div>
+        <div class="value" id="statFailed">–</div>
+        <div class="footnote" id="statBytes">–</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2>All recordings</h2>
+        <span class="count" id="count"></span>
+      </div>
+      <table id="table" style="display:none">
+        <thead>
+          <tr>
+            <th>Meeting</th>
+            <th>Received</th>
+            <th>Status</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">
+        <div class="big">🎧</div>
+        No recordings received yet.<br>Uploads from the device will show up here automatically.
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <header>
+      <h2 id="modalTitle">Transcript</h2>
+      <button class="close" id="modalClose">&times;</button>
+    </header>
+    <div class="body" id="modalBody">Loading...</div>
+  </div>
+</div>
+
+<script>
+const STATUS_LABEL = {
+  received: "Received",
+  transcribing: "Transcribing",
+  summarizing: "Summarizing",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+let allMeetings = [];
+let selectedId = null;
+
+function fmtTime(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i === 0 ? 0 : 1) + " " + units[i];
+}
+
+function timeAgo(iso) {
+  if (!iso) return "-";
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+  if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+  return Math.floor(diff / 86400) + "d ago";
+}
+
+async function fetchAll() {
+  const btn = document.getElementById("refreshBtn");
+  btn.classList.add("loading");
+  try {
+    const [meetingsRes, statsRes] = await Promise.all([
+      fetch("/api/meetings"),
+      fetch("/api/stats"),
+    ]);
+    allMeetings = await meetingsRes.json();
+    const stats = await statsRes.json();
+    renderStats(stats);
+    renderSidebar();
+    renderTable();
+  } finally {
+    btn.classList.remove("loading");
+  }
+}
+
+function renderStats(stats) {
+  document.getElementById("statTotal").textContent = stats.total;
+  document.getElementById("statLast").textContent = stats.last_received
+    ? "Last: " + timeAgo(stats.last_received)
+    : "No recordings yet";
+  document.getElementById("statCompleted").textContent = stats.completed;
+  const pct = stats.total ? Math.round((stats.completed / stats.total) * 100) : 0;
+  document.getElementById("statCompletedPct").textContent = pct + "% success rate";
+  document.getElementById("statProgress").textContent = stats.in_progress;
+  document.getElementById("statFailed").textContent = stats.failed;
+  document.getElementById("statBytes").textContent = fmtBytes(stats.total_bytes) + " received";
+}
+
+function renderSidebar() {
+  const list = document.getElementById("historyList");
+  const query = (document.getElementById("searchInput").value || "").toLowerCase();
+  const filtered = allMeetings.filter(m => m.meeting_name.toLowerCase().includes(query));
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="sidebar-empty">No matches.</div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(m => `
+    <div class="history-item ${m.id === selectedId ? 'active' : ''}" onclick="jumpTo(${m.id})">
+      <span class="dot ${m.status}"></span>
+      <div class="meta">
+        <div class="n">${escapeHtml(m.meeting_name)}</div>
+        <div class="t">${timeAgo(m.received_at)}</div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function jumpTo(id) {
+  selectedId = id;
+  renderSidebar();
+  const row = document.getElementById("row-" + id);
+  if (row) {
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.add("highlight");
+    setTimeout(() => row.classList.remove("highlight"), 1600);
+  }
+}
+
+function renderTable() {
+  const rows = document.getElementById("rows");
+  const table = document.getElementById("table");
+  const empty = document.getElementById("empty");
+  const count = document.getElementById("count");
+
+  count.textContent = allMeetings.length + (allMeetings.length === 1 ? " recording" : " recordings");
+
+  if (allMeetings.length === 0) {
+    table.style.display = "none";
+    empty.style.display = "block";
+    return;
+  }
+  table.style.display = "table";
+  empty.style.display = "none";
+
+  rows.innerHTML = allMeetings.map(m => {
+    const status = m.status;
+    const canRetry = !!m.raw_transcript;
+    const canView = status === "completed" && m.transcript_path;
+    return `
+      <tr id="row-${m.id}">
+        <td class="name">
+          ${escapeHtml(m.meeting_name)}
+          <div class="sz">${fmtBytes(m.wav_bytes)}</div>
+        </td>
+        <td class="time">${fmtTime(m.received_at)}</td>
+        <td>
+          <span class="badge ${status}">${STATUS_LABEL[status] || status}</span>
+          ${status === "failed" && m.error ? `<div class="error-note">${escapeHtml(m.error)}</div>` : ""}
+        </td>
+        <td class="time">${fmtTime(m.updated_at)}</td>
+        <td class="actions">
+          <button class="btn" ${canView ? "" : "disabled"} onclick="viewTranscript(${m.id}, '${escapeAttr(m.meeting_name)}')">View</button>
+          <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="retryMeeting(${m.id}, this)">Resubmit to Claude</button>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function escapeAttr(s) {
+  return String(s).replace(/'/g, "\\'");
+}
+
+async function retryMeeting(id, btn) {
+  btn.disabled = true;
+  btn.textContent = "Resubmitting...";
+  try {
+    const res = await fetch(`/api/meetings/${id}/retry`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Resubmit failed: " + (err.error || res.statusText));
+    }
+  } catch (e) {
+    alert("Resubmit failed: " + e);
+  }
+  await fetchAll();
+}
+
+async function viewTranscript(id, name) {
+  document.getElementById("modalTitle").textContent = name;
+  document.getElementById("modalBody").textContent = "Loading...";
+  document.getElementById("modalBackdrop").classList.add("open");
+  try {
+    const res = await fetch(`/api/meetings/${id}/transcript`);
+    const text = await res.text();
+    document.getElementById("modalBody").textContent = text;
+  } catch (e) {
+    document.getElementById("modalBody").textContent = "Failed to load: " + e;
+  }
+}
+
+document.getElementById("modalClose").onclick = () => {
+  document.getElementById("modalBackdrop").classList.remove("open");
+};
+document.getElementById("modalBackdrop").onclick = (e) => {
+  if (e.target.id === "modalBackdrop") e.target.classList.remove("open");
+};
+document.getElementById("refreshBtn").onclick = fetchAll;
+document.getElementById("searchInput").oninput = renderSidebar;
+
+fetchAll();
+setInterval(fetchAll, 5000);
+</script>
+</body>
+</html>

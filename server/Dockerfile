@@ -10,7 +10,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY receive_and_transcribe.py .
+COPY receive_and_transcribe.py db.py ./
+COPY templates ./templates
 
 EXPOSE 8787
 

@@ -12,6 +12,10 @@ PDFs) - it does not accept raw audio for transcription. So something has to
 turn speech into text first; that's faster-whisper here. Claude's job is the
 second step: turning a rough transcript into something actually useful.
 
+Every upload is tracked in a small SQLite database (status, timestamps,
+errors) and browsable through a web UI at "/", which also lets you resubmit
+a meeting's raw transcript to Claude without needing to re-transcribe.
+
 Run:
     pip install -r requirements.txt
     cp .env.example .env   # then fill in ANTHROPIC_API_KEY at minimum
@@ -26,7 +30,9 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template, send_file, abort
+
+from db import MeetingStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED
 
 load_dotenv()
 
@@ -44,8 +50,11 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+RAW_AUDIO_DIR = OUTPUT_DIR / "raw_audio"
+RAW_AUDIO_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__)
+store = MeetingStore(OUTPUT_DIR / "meetings.db")
 
 _whisper_model = None  # lazy-loaded so the server starts fast
 
@@ -123,6 +132,20 @@ def send_email(subject: str, body_markdown: str):
         server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
 
 
+def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: str):
+    """Runs the Claude cleanup step and saves the result. Used both by the
+    initial upload pipeline and by manual resubmission from the UI."""
+    store.update_status(meeting_id, STATUS_SUMMARIZING)
+    cleaned_markdown = clean_up_with_claude(raw_transcript, meeting_name)
+
+    out_path = OUTPUT_DIR / f"{meeting_name}.md"
+    out_path.write_text(f"# {meeting_name}\n\n{cleaned_markdown}\n", encoding="utf-8")
+    print(f"Wrote transcript: {out_path}")
+
+    send_email(f"Meeting transcript: {meeting_name}", cleaned_markdown)
+    store.save_result(meeting_id, str(out_path))
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     if "audio" not in request.files:
@@ -131,27 +154,72 @@ def upload():
     audio_file = request.files["audio"]
     meeting_name = Path(audio_file.filename).stem or f"meeting_{datetime.now():%Y%m%d_%H%M%S}"
 
-    raw_dir = OUTPUT_DIR / "raw_audio"
-    raw_dir.mkdir(exist_ok=True)
-    wav_path = raw_dir / f"{meeting_name}.wav"
+    wav_path = RAW_AUDIO_DIR / f"{meeting_name}.wav"
     audio_file.save(wav_path)
-    print(f"Received {wav_path} ({wav_path.stat().st_size} bytes)")
+    wav_bytes = wav_path.stat().st_size
+    print(f"Received {wav_path} ({wav_bytes} bytes)")
+
+    meeting_id = store.create(meeting_name, str(wav_path), wav_bytes)
 
     try:
+        store.update_status(meeting_id, STATUS_TRANSCRIBING)
         raw_transcript = transcribe_audio(wav_path)
-        cleaned_markdown = clean_up_with_claude(raw_transcript, meeting_name)
+        store.save_raw_transcript(meeting_id, raw_transcript)
 
-        out_path = OUTPUT_DIR / f"{meeting_name}.md"
-        out_path.write_text(f"# {meeting_name}\n\n{cleaned_markdown}\n", encoding="utf-8")
-        print(f"Wrote transcript: {out_path}")
+        run_summarize_and_save(meeting_id, raw_transcript, meeting_name)
 
-        send_email(f"Meeting transcript: {meeting_name}", cleaned_markdown)
-
-        return jsonify({"status": "ok", "transcript_path": str(out_path)}), 200
+        return jsonify({"status": "ok", "meeting_id": meeting_id}), 200
 
     except Exception as e:
         traceback.print_exc()
+        store.update_status(meeting_id, STATUS_FAILED, error=str(e))
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/meetings", methods=["GET"])
+def list_meetings():
+    return jsonify(store.list_all())
+
+
+@app.route("/api/stats", methods=["GET"])
+def stats():
+    return jsonify(store.stats())
+
+
+@app.route("/api/meetings/<int:meeting_id>/retry", methods=["POST"])
+def retry_meeting(meeting_id):
+    """Resubmits the already-transcribed raw text to Claude again, without
+    re-running Whisper. Useful after a transient API failure, a rate limit,
+    or just to regenerate the summary."""
+    meeting = store.get(meeting_id)
+    if not meeting:
+        abort(404)
+    if not meeting["raw_transcript"]:
+        return jsonify({"error": "no raw transcript available to resubmit - re-upload the audio"}), 400
+
+    try:
+        run_summarize_and_save(meeting_id, meeting["raw_transcript"], meeting["meeting_name"])
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        traceback.print_exc()
+        store.update_status(meeting_id, STATUS_FAILED, error=str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/meetings/<int:meeting_id>/transcript", methods=["GET"])
+def get_transcript(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting or not meeting["transcript_path"]:
+        abort(404)
+    path = Path(meeting["transcript_path"])
+    if not path.exists():
+        abort(404)
+    return send_file(path, mimetype="text/markdown")
+
+
+@app.route("/", methods=["GET"])
+def dashboard():
+    return render_template("dashboard.html")
 
 
 @app.route("/health", methods=["GET"])
@@ -162,4 +230,5 @@ def health():
 if __name__ == "__main__":
     print(f"AI Meeting Buddy receiver listening on port {UPLOAD_PORT}")
     print(f"Transcripts will be saved to: {OUTPUT_DIR.resolve()}")
+    print(f"Dashboard: http://localhost:{UPLOAD_PORT}/")
     app.run(host="0.0.0.0", port=UPLOAD_PORT)

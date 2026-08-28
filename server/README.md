@@ -2,6 +2,8 @@
 
 Receives uploaded recordings, transcribes them, and asks Claude to clean the transcript up into a summary + action items. Two ways to run it: directly with Python, or as a Docker container deployed to `savage.local`.
 
+Every upload is tracked (received time, status, errors) in a small SQLite database and browsable at `http://<host>:8787/` - a dashboard listing all recordings with their state (received / transcribing / summarizing / completed / failed), a "View" button for the finished transcript, and a "Resubmit to Claude" button to retry the cleanup step (e.g. after an API error) without re-transcribing the audio.
+
 ## Option A: Docker on savage.local (recommended)
 
 This is the "set it up once, forget about it" path - the container runs on `savage.local` so your laptop doesn't need to be on and awake for uploads to work.
