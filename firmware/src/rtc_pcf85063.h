@@ -17,8 +17,9 @@ struct RtcTime {
 
 class Pcf85063 {
  public:
+  // Assumes Wire.begin() has already been called for this bus (shared with
+  // the codec - see pins.h) by the time this runs.
   bool begin() {
-    Wire.begin(PIN_RTC_I2C_SDA, PIN_RTC_I2C_SCL);
     // Make sure oscillator is running / not stopped (register 0x00, bit 5 = STOP).
     writeReg(0x00, 0x00);
     return true;

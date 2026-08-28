@@ -25,6 +25,7 @@ Run:
 import os
 import smtplib
 import traceback
+import wave
 from datetime import datetime
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -111,7 +112,7 @@ Raw transcript:
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text
+    return next(block.text for block in response.content if block.type == "text")
 
 
 def send_email(subject: str, body_markdown: str):
@@ -120,16 +121,22 @@ def send_email(subject: str, body_markdown: str):
     if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD and EMAIL_FROM and EMAIL_TO):
         print("EMAIL_ENABLED is true but SMTP settings are incomplete - skipping email.")
         return
+    send_email_to(EMAIL_TO, subject, body_markdown)
+
+
+def send_email_to(to_address: str, subject: str, body_markdown: str):
+    if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD and EMAIL_FROM):
+        raise RuntimeError("SMTP settings are incomplete in .env - cannot send email")
 
     msg = MIMEText(body_markdown, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
+    msg["To"] = to_address
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
+        server.sendmail(EMAIL_FROM, [to_address], msg.as_string())
 
 
 def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: str):
@@ -176,9 +183,37 @@ def upload():
         return jsonify({"error": str(e)}), 500
 
 
+def wav_duration_seconds(wav_path: str) -> float | None:
+    try:
+        with wave.open(wav_path, "rb") as f:
+            return f.getnframes() / f.getframerate()
+    except (OSError, wave.Error):
+        return None
+
+
+def meeting_matches_query(meeting: dict, query: str) -> bool:
+    if query in meeting["meeting_name"].lower():
+        return True
+    if meeting["raw_transcript"] and query in meeting["raw_transcript"].lower():
+        return True
+    if meeting["transcript_path"]:
+        try:
+            if query in Path(meeting["transcript_path"]).read_text(encoding="utf-8").lower():
+                return True
+        except OSError:
+            pass
+    return False
+
+
 @app.route("/api/meetings", methods=["GET"])
 def list_meetings():
-    return jsonify(store.list_all())
+    meetings = store.list_all()
+    query = request.args.get("q", "").strip().lower()
+    if query:
+        meetings = [m for m in meetings if meeting_matches_query(m, query)]
+    for m in meetings:
+        m["duration_seconds"] = wav_duration_seconds(m["wav_path"])
+    return jsonify(meetings)
 
 
 @app.route("/api/stats", methods=["GET"])
@@ -215,6 +250,55 @@ def get_transcript(meeting_id):
     if not path.exists():
         abort(404)
     return send_file(path, mimetype="text/markdown")
+
+
+@app.route("/api/meetings/<int:meeting_id>/raw_transcript", methods=["GET"])
+def get_raw_transcript(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting or not meeting["raw_transcript"]:
+        abort(404)
+    return meeting["raw_transcript"], 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.route("/api/meetings/<int:meeting_id>/transcript", methods=["PUT"])
+def save_transcript(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting or not meeting["transcript_path"]:
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    text = data.get("text")
+    if text is None:
+        return jsonify({"error": "missing 'text' field"}), 400
+
+    path = Path(meeting["transcript_path"])
+    path.write_text(text, encoding="utf-8")
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/api/meetings/<int:meeting_id>/email", methods=["POST"])
+def email_transcript(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting or not meeting["transcript_path"]:
+        abort(404)
+
+    data = request.get_json(silent=True) or {}
+    to_address = (data.get("to") or "").strip()
+    if not to_address or "@" not in to_address:
+        return jsonify({"error": "a valid 'to' email address is required"}), 400
+
+    text = data.get("text")
+    if text is None:
+        path = Path(meeting["transcript_path"])
+        if not path.exists():
+            abort(404)
+        text = path.read_text(encoding="utf-8")
+
+    try:
+        send_email_to(to_address, f"Meeting transcript: {meeting['meeting_name']}", text)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/", methods=["GET"])

@@ -23,40 +23,70 @@ class UiDisplay {
     pinMode(PIN_LCD_BL, OUTPUT);
     digitalWrite(PIN_LCD_BL, HIGH);
 
-    _bg      = _gfx->color565(12, 16, 22);     // near-black, slightly blue
-    _panel   = _gfx->color565(24, 30, 40);
+    _bg      = _gfx->color565(8, 10, 14);      // near-black
+    _panel   = _gfx->color565(26, 28, 34);
     _accent  = _gfx->color565(64, 200, 170);   // teal
     _danger  = _gfx->color565(230, 70, 70);    // recording red
     _text    = _gfx->color565(230, 235, 240);
     _muted   = _gfx->color565(120, 130, 140);
+    _clockGreen = _gfx->color565(80, 240, 170);
+    _wifiBlue   = _gfx->color565(70, 170, 255);
+    _sdYellow   = _gfx->color565(250, 200, 60);
+    _cardPurple = _gfx->color565(120, 100, 235);
 
     _gfx->fillScreen(_bg);
     return true;
   }
 
-  // ---- Idle: clock, battery, wifi, quick hints -----------------------
-  void showIdle(const String &clockStr, int batteryPct, bool wifiConnected, bool hasPendingUploads) {
-    beginFrame("AI MEETING BUDDY");
+  // ---- Idle: big clock, wifi status, SD space ring, last recording card --
+  void showIdle(const String &clockStr, bool wifiConnected, bool sdOk, float sdFreePct, uint32_t lastRecordingSeconds) {
+    _gfx->fillScreen(_bg);
 
-    _gfx->setTextColor(_text);
-    _gfx->setTextSize(4);
-    centerText(clockStr, 70);
+    // Big vibrant clock, top-left aligned like the reference watch face.
+    _gfx->setTextColor(_clockGreen);
+    _gfx->setTextSize(5);
+    _gfx->setCursor(16, 20);
+    _gfx->print(clockStr);
 
-    // Battery pill
-    drawBatteryIcon(20, 120, batteryPct);
-    _gfx->setTextSize(2);
-    _gfx->setTextColor(_muted);
-    _gfx->setCursor(56, 124);
-    _gfx->printf("%d%%", batteryPct);
+    // WiFi status, upper right.
+    drawWifiIcon(200, 24, wifiConnected);
 
-    // WiFi dot
-    drawWifiIcon(170, 120, wifiConnected);
-
-    if (hasPendingUploads) {
-      _gfx->setTextColor(_accent);
-      _gfx->setTextSize(2);
-      centerText("recordings queued", 160);
+    // SD-card free-space ring, bottom-left (or a fault indicator if the
+    // card isn't present/couldn't be mounted).
+    int ringCx = 70, ringCy = 190, ringR = 46;
+    if (sdOk) {
+      drawProgressRing(ringCx, ringCy, ringR, sdFreePct, _sdYellow);
+      char pctBuf[8];
+      snprintf(pctBuf, sizeof(pctBuf), "%d%%", (int)(sdFreePct + 0.5f));
+      _gfx->setTextColor(_text);
+      centerTextAt(pctBuf, ringCx, ringCy - 8, 2);
+      _gfx->setTextColor(_muted);
+      centerTextAt("SD FREE", ringCx, ringCy + 14, 1);
+    } else {
+      drawProgressRing(ringCx, ringCy, ringR, 100.0f, _danger);
+      _gfx->setTextColor(_danger);
+      centerTextAt("NO SD", ringCx, ringCy - 8, 2);
+      _gfx->setTextColor(_muted);
+      centerTextAt("CARD", ringCx, ringCy + 14, 1);
     }
+
+    // Last-recording card, bottom-right.
+    int cardX = 128, cardY = 148, cardW = 96, cardH = 84;
+    _gfx->fillRoundRect(cardX, cardY, cardW, cardH, 12, _panel);
+    _gfx->drawRoundRect(cardX, cardY, cardW, cardH, 12, _cardPurple);
+    _gfx->setTextColor(_muted);
+    _gfx->setTextSize(1);
+    _gfx->setCursor(cardX + 10, cardY + 10);
+    _gfx->print("LAST REC");
+
+    uint32_t m = lastRecordingSeconds / 60;
+    uint32_t s = lastRecordingSeconds % 60;
+    char durBuf[8];
+    snprintf(durBuf, sizeof(durBuf), "%02lu:%02lu", (unsigned long)m, (unsigned long)s);
+    _gfx->setTextColor(_cardPurple);
+    _gfx->setTextSize(2);
+    _gfx->setCursor(cardX + 10, cardY + 34);
+    _gfx->print(durBuf);
 
     drawFooter("press: record", "hold: menu");
   }
@@ -151,6 +181,7 @@ class UiDisplay {
   Arduino_DataBus *_bus = nullptr;
   Arduino_GFX *_gfx = nullptr;
   uint16_t _bg, _panel, _accent, _danger, _text, _muted;
+  uint16_t _clockGreen, _wifiBlue, _sdYellow, _cardPurple;
 
   void beginFrame(const char *headerTitle) {
     _gfx->fillScreen(_bg);
@@ -195,10 +226,39 @@ class UiDisplay {
   }
 
   void drawWifiIcon(int x, int y, bool connected) {
-    uint16_t c = connected ? _accent : _muted;
+    uint16_t c = connected ? _wifiBlue : _muted;
     _gfx->drawCircle(x + 8, y + 10, 3, c);
     _gfx->drawCircle(x + 8, y + 10, 8, c);
     if (connected) _gfx->drawCircle(x + 8, y + 10, 12, c);
+  }
+
+  // Text centered on (cx, cy) rather than top-left at (x, y).
+  void centerTextAt(const String &s, int cx, int cy, uint8_t textSize) {
+    _gfx->setTextSize(textSize);
+    int16_t x1, y1;
+    uint16_t w, h;
+    _gfx->getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+    _gfx->setCursor(cx - (int)w / 2, cy - (int)h / 2);
+    _gfx->print(s);
+  }
+
+  // Circular progress ring (e.g. SD card free space), 0-100%, drawn as a
+  // background track plus a foreground arc swept clockwise from the top.
+  void drawProgressRing(int cx, int cy, int r, float pct, uint16_t color) {
+    pct = constrain(pct, 0.0f, 100.0f);
+    const int thickness = 8;
+    for (int rr = r - thickness; rr <= r; rr++) {
+      _gfx->drawCircle(cx, cy, rr, _panel);
+    }
+    float sweepDeg = 360.0f * (pct / 100.0f);
+    for (float a = -90.0f; a < -90.0f + sweepDeg; a += 2.0f) {
+      float rad = a * PI / 180.0f;
+      for (int rr = r - thickness; rr <= r; rr++) {
+        int px = cx + (int)(cosf(rad) * rr);
+        int py = cy + (int)(sinf(rad) * rr);
+        _gfx->drawPixel(px, py, color);
+      }
+    }
   }
 
   // Vertical bar waveform from the visualizer's ring buffer.

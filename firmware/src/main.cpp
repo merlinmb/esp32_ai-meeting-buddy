@@ -23,6 +23,7 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <SD.h>
 #include <vector>
 
@@ -49,9 +50,11 @@ static RecordButton button;
 static WifiUploader uploader;
 static AudioVisualizer visualizer;
 
+static bool sdOk = false;
 static unsigned long recordingStartMs = 0;
 static unsigned long lastIdleRedrawMs = 0;
 static unsigned long lastUploadAttemptMs = 0;
+static uint32_t lastRecordingSeconds = 0;
 
 static const std::vector<MenuItem> kMenuItems = {
   {"Upload now"},
@@ -74,10 +77,15 @@ int readBatteryPercent() {
 }
 
 bool hasPendingUploads() {
-  return !WavRecorder::pendingFiles().empty();
+  return sdOk && !WavRecorder::pendingFiles().empty();
 }
 
 void startRecording() {
+  if (!sdOk) {
+    ui.showMessage("SD card fault!\nInsert a card and\nrestart to record.");
+    delay(1500);
+    return;
+  }
   String base = rtc.filenameTimestamp();
   if (!recorder.startNewFile(base)) {
     ui.showMessage("SD write failed!");
@@ -91,6 +99,7 @@ void startRecording() {
 }
 
 void stopRecording() {
+  lastRecordingSeconds = (millis() - recordingStartMs) / 1000;
   recorder.close();
   codec.mute(true);
   state = State::IDLE;
@@ -109,6 +118,7 @@ void pumpAudioToSd() {
 }
 
 void tryUpload() {
+  if (!sdOk) return;
   auto pending = WavRecorder::pendingFiles();
   if (pending.empty()) return;
 
@@ -150,15 +160,20 @@ void showWifiInfoScreen() {
 
 void showStorageInfoScreen() {
   std::vector<String> lines;
-  uint64_t totalMb = SD.totalBytes() / (1024ULL * 1024ULL);
-  uint64_t usedMb = SD.usedBytes() / (1024ULL * 1024ULL);
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%llu / %llu MB used", usedMb, totalMb);
-  lines.push_back(buf);
+  if (!sdOk) {
+    lines.push_back("SD card fault -");
+    lines.push_back("no card detected");
+  } else {
+    uint64_t totalMb = SD.totalBytes() / (1024ULL * 1024ULL);
+    uint64_t usedMb = SD.usedBytes() / (1024ULL * 1024ULL);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%llu / %llu MB used", usedMb, totalMb);
+    lines.push_back(buf);
 
-  int pendingCount = (int)WavRecorder::pendingFiles().size();
-  snprintf(buf, sizeof(buf), "%d recording(s) pending upload", pendingCount);
-  lines.push_back(buf);
+    int pendingCount = (int)WavRecorder::pendingFiles().size();
+    snprintf(buf, sizeof(buf), "%d recording(s) pending upload", pendingCount);
+    lines.push_back(buf);
+  }
   ui.showInfo("STORAGE", lines);
 }
 
@@ -194,6 +209,7 @@ void runSelectedMenuItem() {
 void setup() {
   Serial.begin(115200);
 
+  Wire.begin(PIN_CODEC_I2C_SDA, PIN_CODEC_I2C_SCL);  // shared bus - codec + RTC
   rtc.begin();
   codec.begin(SAMPLE_RATE_HZ);
   codec.setMicGain(4);
@@ -204,7 +220,8 @@ void setup() {
     Serial.println("I2S init failed");
   }
 
-  if (!recorder.beginSd()) {
+  sdOk = recorder.beginSd();
+  if (!sdOk) {
     Serial.println("SD init failed - check wiring/pins.h");
   }
 
@@ -238,7 +255,13 @@ void loop() {
         if (rtc.getTime(t)) {
           snprintf(clockBuf, sizeof(clockBuf), "%02d:%02d", t.hour, t.minute);
         }
-        ui.showIdle(clockBuf, readBatteryPercent(), WiFi.status() == WL_CONNECTED, hasPendingUploads());
+        float sdFreePct = 0.0f;
+        if (sdOk) {
+          uint64_t sdTotal = SD.totalBytes();
+          uint64_t sdUsed = SD.usedBytes();
+          sdFreePct = sdTotal > 0 ? 100.0f * (float)(sdTotal - sdUsed) / (float)sdTotal : 0.0f;
+        }
+        ui.showIdle(clockBuf, WiFi.status() == WL_CONNECTED, sdOk, sdFreePct, lastRecordingSeconds);
       }
       if (AUTO_UPLOAD_WHEN_IDLE && (millis() - lastUploadAttemptMs > UPLOAD_RETRY_INTERVAL_MS)) {
         lastUploadAttemptMs = millis();

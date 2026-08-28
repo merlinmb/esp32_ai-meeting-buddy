@@ -24,9 +24,8 @@
 
 class ES8311 {
  public:
+  // Assumes Wire.begin() has already been called for this bus by the caller.
   bool begin(uint32_t sampleRateHz) {
-    Wire.begin(PIN_CODEC_I2C_SDA, PIN_CODEC_I2C_SCL);
-
     // Reset
     writeReg(0x00, 0x1F);
     delay(10);

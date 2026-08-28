@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI Meeting Buddy</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A==" crossorigin="anonymous" referrerpolicy="no-referrer">
+
 <style>
   :root {
     --bg: #0a0b10;
@@ -26,6 +28,7 @@
     --radius-sm: 8px;
   }
   * { box-sizing: border-box; }
+  html, body { overflow-x: hidden; }
   body {
     margin: 0;
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -37,30 +40,47 @@
     min-height: 100vh;
   }
 
-  .layout {
+  /* ---------- App shell: 3 columns ---------- */
+  .app-shell {
     display: grid;
-    grid-template-columns: 260px 1fr;
-    min-height: 100vh;
+    grid-template-columns: 15% 30% 1fr;
+    height: 100vh;
   }
 
-  /* ---------- Sidebar ---------- */
-  aside {
-    background: var(--bg-alt);
+  .col-brand {
+    padding: 24px 20px;
     border-right: 1px solid var(--border-soft);
-    padding: 22px 16px;
     display: flex;
     flex-direction: column;
     gap: 20px;
-    position: sticky;
-    top: 0;
-    height: 100vh;
     overflow-y: auto;
+    min-width: 220px;
+  }
+
+  .col-table {
+    border-right: 1px solid var(--border-soft);
+    display: flex;
+    flex-direction: column;
+    min-width: 280px;
+    overflow: hidden;
+  }
+
+  .col-transcript {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .top-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
   }
   .brand {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 4px 8px 10px;
   }
   .brand .mark {
     width: 32px;
@@ -87,139 +107,28 @@
     margin-top: 1px;
   }
 
-  .sidebar-section-label {
-    font-size: 0.68rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-faint);
-    padding: 0 8px;
-    margin-bottom: 2px;
-  }
-
-  .nav-search {
-    padding: 0 4px;
-  }
-  .nav-search input {
-    width: 100%;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    font-size: 0.82rem;
-    outline: none;
-  }
-  .nav-search input:focus { border-color: var(--accent); }
-  .nav-search input::placeholder { color: var(--text-faint); }
-
-  .history-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    flex: 1;
-    overflow-y: auto;
-  }
-  .history-item {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 9px 10px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    border: 1px solid transparent;
-    background: transparent;
-  }
-  .history-item:hover { background: var(--panel); }
-  .history-item.active {
-    background: var(--panel-2);
-    border-color: var(--border);
-  }
-  .history-item .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .dot.received, .dot.transcribing, .dot.summarizing { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
-  .dot.completed { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-  .dot.failed { background: var(--err); box-shadow: 0 0 8px var(--err); }
-
-  .history-item .meta {
-    min-width: 0;
-    flex: 1;
-  }
-  .history-item .meta .n {
-    font-size: 0.82rem;
-    font-weight: 500;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .history-item .meta .t {
-    font-size: 0.7rem;
-    color: var(--text-faint);
-  }
-
-  .sidebar-empty {
-    color: var(--text-faint);
-    font-size: 0.78rem;
-    padding: 10px;
-  }
-
-  /* ---------- Main ---------- */
-  main {
-    padding: 32px 40px 60px;
-    max-width: 1200px;
-  }
-
-  .page-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 28px;
-    flex-wrap: wrap;
-  }
   .page-header h1 {
     margin: 0 0 4px;
-    font-size: 1.6rem;
+    font-size: 1.4rem;
     font-weight: 700;
     letter-spacing: -0.02em;
   }
-  .page-header .sub { color: var(--text-dim); font-size: 0.88rem; }
-
-  button.refresh {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 9px 16px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 0.82rem;
-    font-weight: 500;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-  }
-  button.refresh:hover { border-color: var(--accent); color: var(--accent); }
-  button.refresh .spin { display: inline-block; transition: transform 0.5s; }
-  button.refresh.loading .spin { animation: spin 0.7s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .page-header .sub { color: var(--text-dim); font-size: 0.82rem; line-height: 1.4; }
 
   /* ---------- Hero metric cards ---------- */
   .hero-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
   .hero-card {
     position: relative;
     background: linear-gradient(160deg, var(--panel), var(--panel-2));
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 20px 20px 18px;
+    padding: 16px 16px 14px;
     overflow: hidden;
+    text-align: center;
   }
   .hero-card::after {
     content: "";
@@ -241,6 +150,7 @@
     margin-bottom: 10px;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 7px;
   }
   .hero-card .icon {
@@ -281,16 +191,46 @@
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
+  .col-table .panel, .col-transcript .panel {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
   .panel-header {
     padding: 16px 20px;
     border-bottom: 1px solid var(--border-soft);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
   }
   .panel-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
   .panel-header .count { color: var(--text-faint); font-size: 0.8rem; }
 
+  .panel-search {
+    flex: 1;
+    min-width: 120px;
+  }
+  .panel-search input {
+    width: 100%;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    outline: none;
+  }
+  .panel-search input:focus { border-color: var(--accent); }
+  .panel-search input::placeholder { color: var(--text-faint); }
+
+  .table-scroll { overflow: auto; flex: 1; min-height: 0; }
   table { width: 100%; border-collapse: collapse; }
   thead th {
     text-align: left;
@@ -298,23 +238,49 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-faint);
-    padding: 10px 20px;
+    padding: 10px 16px;
     border-bottom: 1px solid var(--border-soft);
     font-weight: 600;
+    white-space: nowrap;
   }
   tbody tr {
     border-bottom: 1px solid var(--border-soft);
     transition: background 0.15s;
-    scroll-margin-top: 100px;
+    cursor: pointer;
   }
   tbody tr:last-child { border-bottom: none; }
   tbody tr:hover { background: var(--panel-2); }
-  tbody tr.highlight { background: rgba(139, 123, 255, 0.10); }
-  td { padding: 13px 20px; font-size: 0.86rem; vertical-align: middle; }
+  tbody tr.active { background: rgba(139, 123, 255, 0.10); }
+  td { padding: 12px 16px; font-size: 0.85rem; vertical-align: middle; }
   td.name { font-weight: 500; }
   td.name .sz { color: var(--text-faint); font-size: 0.74rem; font-weight: 400; margin-top: 2px; }
   td.time { color: var(--text-dim); font-size: 0.8rem; white-space: nowrap; }
-  td.actions { white-space: nowrap; }
+  td.actions { white-space: normal; }
+
+  /* Table column layout is optimized for the narrower middle column:
+     hide secondary time columns, keep meeting name + status + actions front and center. */
+  th.col-secondary, td.col-secondary { display: none; }
+
+  .actions-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  td.actions .btn {
+    flex: 1;
+    min-width: 0;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .table-icon-btn {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+  }
+  .table-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .table-icon-btn:disabled:hover { background: rgba(139, 123, 255, 0.14); }
 
   .badge {
     display: inline-flex;
@@ -367,48 +333,43 @@
     white-space: normal;
   }
 
-  /* ---------- Modal ---------- */
-  .modal-backdrop {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(4, 5, 10, 0.68);
-    backdrop-filter: blur(3px);
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    z-index: 10;
-  }
-  .modal-backdrop.open { display: flex; }
-  .modal {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    max-width: 760px;
-    width: 100%;
-    max-height: 82vh;
+  /* ---------- Detail panel (transcript viewer/editor) ---------- */
+  .detail-panel {
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    height: 100%;
+    min-height: 0;
   }
-  .modal header {
-    padding: 18px 22px;
+  .detail-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    color: var(--text-dim);
+    padding: 40px;
+  }
+  .detail-empty .big { font-size: 2.4rem; margin-bottom: 14px; opacity: 0.7; }
+  .detail-empty .title { font-size: 1rem; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+  .detail-empty .hint { font-size: 0.84rem; max-width: 320px; line-height: 1.5; }
+  .detail-panel header {
+    padding: 16px 20px;
     border-bottom: 1px solid var(--border-soft);
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
   }
-  .modal header h2 { margin: 0; font-size: 1.02rem; font-weight: 600; }
-  .modal .body {
-    padding: 20px 22px;
-    overflow-y: auto;
-    font-size: 0.85rem;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    color: #d7dae4;
+  .detail-panel header h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .modal .close {
+  .detail-panel .close {
     background: none;
     border: none;
     color: var(--text-dim);
@@ -416,100 +377,279 @@
     cursor: pointer;
     line-height: 1;
     padding: 4px;
+    flex-shrink: 0;
   }
-  .modal .close:hover { color: var(--text); }
+  .detail-panel .close:hover { color: var(--text); }
+  .detail-recorded {
+    font-size: 0.76rem;
+    color: var(--text-faint);
+    margin-top: 2px;
+  }
 
-  @media (max-width: 900px) {
-    .layout { grid-template-columns: 1fr; }
-    aside { position: static; height: auto; }
-    .hero-grid { grid-template-columns: repeat(2, 1fr); }
-    main { padding: 24px 18px 50px; }
+  /* Email bar — prominent, sits right under the header as a primary action */
+  .email-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .email-bar .email-icon {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: rgba(139, 123, 255, 0.14);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+  .icon-btn {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: rgba(139, 123, 255, 0.14);
+    border: none;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: rgba(139, 123, 255, 0.26); }
+  .email-bar input[type="email"] {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 13px;
+    border-radius: var(--radius-sm);
+    font-size: 0.86rem;
+    outline: none;
+  }
+  .email-bar input[type="email"]:focus { border-color: var(--accent); }
+  .email-bar input[type="email"]::placeholder { color: var(--text-faint); }
+  .email-bar .btn.primary { margin: 0; flex-shrink: 0; padding: 10px 18px; }
+
+  .detail-panel .body {
+    padding: 16px 20px 20px;
+    overflow-y: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: #d7dae4;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #transcriptEditor {
+    width: 100%;
+    flex: 1;
+    min-height: 520px;
+    resize: vertical;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: #e4e6ee;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92rem;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    padding: 20px 22px;
+    outline: none;
+  }
+  #transcriptEditor:focus { border-color: var(--accent); }
+  #transcriptEditor:read-only { color: #b9bccb; background: var(--panel-2); }
+  #transcriptEditor:read-only:focus { border-color: var(--border); }
+
+  .detail-toolbar {
+    min-height: 18px;
+    margin-bottom: 12px;
+  }
+  .detail-status {
+    font-size: 0.76rem;
+    color: var(--text-faint);
+  }
+
+  /* ---------- Mobile nav (bottom tab bar) ---------- */
+  .mobile-tabs { display: none; }
+
+  /* ---------- Responsive breakpoints ---------- */
+
+  /* Tablet: narrow the fixed columns a bit, transcript still gets the remainder */
+  @media (max-width: 1200px) {
+    .app-shell { grid-template-columns: 200px 320px 1fr; }
+  }
+
+  /* Mobile: stack into a single column, switch to a tab-based view.
+     Only one of [brand, table, transcript] is visible at a time,
+     controlled by a bottom tab bar and the .mobile-active class. */
+  @media (max-width: 860px) {
+    .app-shell {
+      display: block;
+      height: auto;
+      min-height: 100vh;
+      padding-bottom: 64px;
+    }
+    .col-brand, .col-table, .col-transcript {
+      display: none;
+      border-right: none;
+      min-width: 0;
+      width: 100%;
+    }
+    .col-brand.mobile-active, .col-table.mobile-active, .col-transcript.mobile-active {
+      display: flex;
+    }
+    .col-brand { border-bottom: 1px solid var(--border-soft); }
+    .col-table { border-bottom: 1px solid var(--border-soft); height: auto; min-height: 60vh; }
+    .col-table.mobile-active, .col-transcript.mobile-active { height: auto; min-height: calc(100vh - 64px); }
+
+    .col-table .panel, .col-transcript .panel { height: auto; min-height: calc(100vh - 64px); }
+
+    th.col-secondary, td.col-secondary { display: none; }
+
+    #transcriptEditor { min-height: 60vh; }
+
+    .mobile-tabs {
+      display: flex;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 64px;
+      background: var(--panel);
+      border-top: 1px solid var(--border-soft);
+      z-index: 20;
+    }
+    .mobile-tabs button {
+      flex: 1;
+      background: none;
+      border: none;
+      color: var(--text-faint);
+      font-size: 0.68rem;
+      font-weight: 600;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+    .mobile-tabs button .tab-icon { font-size: 1.15rem; }
+    .mobile-tabs button.active { color: var(--accent); }
   }
 </style>
 </head>
 <body>
-<div class="layout">
-  <aside>
-    <div class="brand">
-      <div class="mark">🎙️</div>
-      <div class="name">Meeting Buddy<small>Receiver console</small></div>
-    </div>
-
-    <div class="nav-search">
-      <input type="text" id="searchInput" placeholder="Search recordings...">
-    </div>
-
-    <div>
-      <div class="sidebar-section-label">History</div>
-      <div class="history-list" id="historyList"></div>
-    </div>
-  </aside>
-
-  <main>
-    <div class="page-header">
-      <div>
-        <h1>Dashboard</h1>
-        <div class="sub">Recordings received from the field unit, transcribed and cleaned up by Claude.</div>
+<div class="app-shell">
+  <div class="col-brand mobile-active" id="colBrand">
+    <div class="top-bar">
+      <div class="brand">
+        <div class="mark"><i class="fa-solid fa-microphone"></i></div>
+        <div class="name">Meeting Buddy<small>Receiver console</small></div>
       </div>
-      <button class="refresh" id="refreshBtn"><span class="spin">⟳</span> Refresh</button>
+    </div>
+
+    <div class="page-header">
+      <h1>Dashboard</h1>
+      <div class="sub">Recordings received from the field unit, transcribed and cleaned up by Claude.</div>
     </div>
 
     <div class="hero-grid">
       <div class="hero-card total">
-        <div class="label"><span class="icon">📥</span> Total received</div>
+        <div class="label"><span class="icon"><i class="fa-solid fa-inbox"></i></span> Total received</div>
         <div class="value" id="statTotal">–</div>
         <div class="footnote" id="statLast">–</div>
       </div>
       <div class="hero-card completed">
-        <div class="label"><span class="icon">✓</span> Completed</div>
+        <div class="label"><span class="icon"><i class="fa-solid fa-circle-check"></i></span> Completed</div>
         <div class="value" id="statCompleted">–</div>
         <div class="footnote" id="statCompletedPct">–</div>
       </div>
       <div class="hero-card progress">
-        <div class="label"><span class="icon">⏳</span> In progress</div>
+        <div class="label"><span class="icon"><i class="fa-solid fa-hourglass-half"></i></span> In progress</div>
         <div class="value" id="statProgress">–</div>
         <div class="footnote">Transcribing or summarizing</div>
       </div>
       <div class="hero-card failed">
-        <div class="label"><span class="icon">⚠</span> Failed</div>
+        <div class="label"><span class="icon"><i class="fa-solid fa-triangle-exclamation"></i></span> Failed</div>
         <div class="value" id="statFailed">–</div>
         <div class="footnote" id="statBytes">–</div>
       </div>
     </div>
+  </div>
 
+  <div class="col-table" id="colTable">
     <div class="panel">
       <div class="panel-header">
         <h2>All recordings</h2>
+        <div class="panel-search">
+          <input type="text" id="searchInput" placeholder="Search recordings...">
+        </div>
         <span class="count" id="count"></span>
       </div>
-      <table id="table" style="display:none">
-        <thead>
-          <tr>
-            <th>Meeting</th>
-            <th>Received</th>
-            <th>Status</th>
-            <th>Updated</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
+      <div class="table-scroll">
+        <table id="table" style="display:none">
+          <thead>
+            <tr>
+              <th>Meeting</th>
+              <th class="col-secondary">Recorded</th>
+              <th class="col-secondary">Received</th>
+              <th>Status</th>
+              <th class="col-secondary">Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
       <div class="empty" id="empty" style="display:none">
-        <div class="big">🎧</div>
+        <div class="big"><i class="fa-solid fa-headphones-simple"></i></div>
         No recordings received yet.<br>Uploads from the device will show up here automatically.
       </div>
     </div>
-  </main>
-</div>
-
-<div class="modal-backdrop" id="modalBackdrop">
-  <div class="modal">
-    <header>
-      <h2 id="modalTitle">Transcript</h2>
-      <button class="close" id="modalClose">&times;</button>
-    </header>
-    <div class="body" id="modalBody">Loading...</div>
   </div>
+
+  <div class="col-transcript" id="colTranscript">
+    <div class="panel detail-panel" id="detailPanel">
+      <div class="detail-empty" id="detailEmpty">
+        <div class="big"><i class="fa-solid fa-file-lines"></i></div>
+        <div class="title">No transcript selected</div>
+        <div class="hint">Choose a completed recording from the list to view, edit, and email its transcript.</div>
+      </div>
+      <header id="detailHeader" style="display:none">
+        <div>
+          <h2 id="detailTitle">Transcript</h2>
+          <div class="detail-recorded" id="detailRecorded"></div>
+        </div>
+        <button class="close" id="detailClose"><i class="fa-solid fa-xmark"></i></button>
+      </header>
+      <div class="email-bar" id="detailEmailBar" style="display:none">
+        <button class="icon-btn" id="copyBtn" title="Copy transcript"><i class="fa-regular fa-copy"></i></button>
+        <div class="email-icon"><i class="fa-solid fa-envelope"></i></div>
+        <input type="email" id="emailTo" placeholder="Send transcript to email address...">
+        <button class="btn primary" id="emailBtn">Send</button>
+      </div>
+      <div class="body" id="detailBody" style="display:none">
+        <div class="detail-toolbar">
+          <span class="detail-status" id="detailStatus"></span>
+        </div>
+        <textarea id="transcriptEditor">Loading...</textarea>
+      </div>
+    </div>
+  </div>
+
+  <nav class="mobile-tabs">
+    <button class="tab-brand active" data-tab="brand"><span class="tab-icon"><i class="fa-solid fa-chart-column"></i></span>Overview</button>
+    <button class="tab-table" data-tab="table"><span class="tab-icon"><i class="fa-solid fa-list"></i></span>Recordings</button>
+    <button class="tab-transcript" data-tab="transcript"><span class="tab-icon"><i class="fa-solid fa-file-lines"></i></span>Transcript</button>
+  </nav>
 </div>
 
 <script>
@@ -522,7 +662,9 @@ const STATUS_LABEL = {
 };
 
 let allMeetings = [];
-let selectedId = null;
+let currentMeetingId = null;
+let saveTimer = null;
+let viewingRaw = false;
 
 function fmtTime(iso) {
   if (!iso) return "-";
@@ -539,6 +681,31 @@ function fmtBytes(n) {
   return n.toFixed(i === 0 ? 0 : 1) + " " + units[i];
 }
 
+function fmtDuration(seconds) {
+  if (!seconds && seconds !== 0) return null;
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Device filenames look like "MEETING_YYYYMMDD_HHMMSS" (from the ESP32's RTC) -
+// that's the actual recording time, distinct from when the server received the upload.
+function parseRecordedAt(meetingName) {
+  const m = /^MEETING_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(meetingName);
+  if (!m) return null;
+  const [year, month, day, hour, minute, second] = m.slice(1).map(Number);
+  return new Date(year, month - 1, day, hour, minute, second);
+}
+
+function fmtRecordedAt(meetingName) {
+  const d = parseRecordedAt(meetingName);
+  if (!d) return "-";
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function timeAgo(iso) {
   if (!iso) return "-";
   const diff = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -549,21 +716,15 @@ function timeAgo(iso) {
 }
 
 async function fetchAll() {
-  const btn = document.getElementById("refreshBtn");
-  btn.classList.add("loading");
-  try {
-    const [meetingsRes, statsRes] = await Promise.all([
-      fetch("/api/meetings"),
-      fetch("/api/stats"),
-    ]);
-    allMeetings = await meetingsRes.json();
-    const stats = await statsRes.json();
-    renderStats(stats);
-    renderSidebar();
-    renderTable();
-  } finally {
-    btn.classList.remove("loading");
-  }
+  const query = document.getElementById("searchInput").value || "";
+  const [meetingsRes, statsRes] = await Promise.all([
+    fetch("/api/meetings?q=" + encodeURIComponent(query)),
+    fetch("/api/stats"),
+  ]);
+  allMeetings = await meetingsRes.json();
+  const stats = await statsRes.json();
+  renderStats(stats);
+  renderTable();
 }
 
 function renderStats(stats) {
@@ -579,49 +740,21 @@ function renderStats(stats) {
   document.getElementById("statBytes").textContent = fmtBytes(stats.total_bytes) + " received";
 }
 
-function renderSidebar() {
-  const list = document.getElementById("historyList");
-  const query = (document.getElementById("searchInput").value || "").toLowerCase();
-  const filtered = allMeetings.filter(m => m.meeting_name.toLowerCase().includes(query));
-
-  if (filtered.length === 0) {
-    list.innerHTML = `<div class="sidebar-empty">No matches.</div>`;
-    return;
-  }
-
-  list.innerHTML = filtered.map(m => `
-    <div class="history-item ${m.id === selectedId ? 'active' : ''}" onclick="jumpTo(${m.id})">
-      <span class="dot ${m.status}"></span>
-      <div class="meta">
-        <div class="n">${escapeHtml(m.meeting_name)}</div>
-        <div class="t">${timeAgo(m.received_at)}</div>
-      </div>
-    </div>
-  `).join("");
-}
-
-function jumpTo(id) {
-  selectedId = id;
-  renderSidebar();
-  const row = document.getElementById("row-" + id);
-  if (row) {
-    row.scrollIntoView({ behavior: "smooth", block: "center" });
-    row.classList.add("highlight");
-    setTimeout(() => row.classList.remove("highlight"), 1600);
-  }
-}
-
 function renderTable() {
   const rows = document.getElementById("rows");
   const table = document.getElementById("table");
   const empty = document.getElementById("empty");
   const count = document.getElementById("count");
+  const hasQuery = (document.getElementById("searchInput").value || "").trim().length > 0;
 
   count.textContent = allMeetings.length + (allMeetings.length === 1 ? " recording" : " recordings");
 
   if (allMeetings.length === 0) {
     table.style.display = "none";
     empty.style.display = "block";
+    empty.innerHTML = hasQuery
+      ? `<div class="big"><i class="fa-solid fa-magnifying-glass"></i></div>No recordings match your search.`
+      : `<div class="big"><i class="fa-solid fa-headphones-simple"></i></div>No recordings received yet.<br>Uploads from the device will show up here automatically.`;
     return;
   }
   table.style.display = "table";
@@ -630,26 +763,36 @@ function renderTable() {
   rows.innerHTML = allMeetings.map(m => {
     const status = m.status;
     const canRetry = !!m.raw_transcript;
-    const canView = status === "completed" && m.transcript_path;
     return `
-      <tr id="row-${m.id}">
+      <tr id="row-${m.id}" class="${m.id === currentMeetingId ? 'active' : ''}" onclick="rowClicked(event, ${m.id})">
         <td class="name">
           ${escapeHtml(m.meeting_name)}
-          <div class="sz">${fmtBytes(m.wav_bytes)}</div>
+          <div class="sz">${fmtBytes(m.wav_bytes)}${fmtDuration(m.duration_seconds) ? " · " + fmtDuration(m.duration_seconds) : ""}</div>
         </td>
-        <td class="time">${fmtTime(m.received_at)}</td>
+        <td class="time col-secondary">${fmtRecordedAt(m.meeting_name)}</td>
+        <td class="time col-secondary">${fmtTime(m.received_at)}</td>
         <td>
           <span class="badge ${status}">${STATUS_LABEL[status] || status}</span>
           ${status === "failed" && m.error ? `<div class="error-note">${escapeHtml(m.error)}</div>` : ""}
         </td>
-        <td class="time">${fmtTime(m.updated_at)}</td>
+        <td class="time col-secondary">${fmtTime(m.updated_at)}</td>
         <td class="actions">
-          <button class="btn" ${canView ? "" : "disabled"} onclick="viewTranscript(${m.id}, '${escapeAttr(m.meeting_name)}')">View</button>
-          <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="retryMeeting(${m.id}, this)">Resubmit to Claude</button>
+          <div class="actions-row">
+            <button class="icon-btn table-icon-btn" ${canRetry ? "" : "disabled"} title="View raw transcript (Whisper output)" onclick="event.stopPropagation(); viewRawTranscript(${m.id}, '${escapeAttr(m.meeting_name)}')"><i class="fa-solid fa-microphone-lines"></i></button>
+            <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="event.stopPropagation(); retryMeeting(${m.id}, this)">Resubmit</button>
+          </div>
         </td>
       </tr>
     `;
   }).join("");
+}
+
+function rowClicked(e, id) {
+  const m = allMeetings.find(x => x.id === id);
+  if (!m) return;
+  if (m.status === "completed" && m.transcript_path) {
+    viewTranscript(id, m.meeting_name);
+  }
 }
 
 function escapeHtml(s) {
@@ -675,26 +818,162 @@ async function retryMeeting(id, btn) {
 }
 
 async function viewTranscript(id, name) {
-  document.getElementById("modalTitle").textContent = name;
-  document.getElementById("modalBody").textContent = "Loading...";
-  document.getElementById("modalBackdrop").classList.add("open");
+  currentMeetingId = id;
+  viewingRaw = false;
+  document.getElementById("detailEmpty").style.display = "none";
+  document.getElementById("detailHeader").style.display = "flex";
+  document.getElementById("detailEmailBar").style.display = "flex";
+  document.getElementById("detailBody").style.display = "flex";
+  document.getElementById("detailTitle").textContent = name;
+  const meeting = allMeetings.find(x => x.id === id);
+  const recordedAt = parseRecordedAt(name);
+  const parts = [];
+  if (recordedAt) parts.push("Recorded " + recordedAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }));
+  const duration = meeting ? fmtDuration(meeting.duration_seconds) : null;
+  if (duration) parts.push(duration + " long");
+  document.getElementById("detailRecorded").textContent = parts.join(" · ");
+  const editor = document.getElementById("transcriptEditor");
+  const status = document.getElementById("detailStatus");
+  editor.value = "Loading...";
+  editor.readOnly = false;
+  status.textContent = "";
+  document.getElementById("emailTo").value = "";
+  renderTable();
+  showMobileTab("transcript");
   try {
     const res = await fetch(`/api/meetings/${id}/transcript`);
     const text = await res.text();
-    document.getElementById("modalBody").textContent = text;
+    editor.value = text;
   } catch (e) {
-    document.getElementById("modalBody").textContent = "Failed to load: " + e;
+    editor.value = "Failed to load: " + e;
   }
 }
 
-document.getElementById("modalClose").onclick = () => {
-  document.getElementById("modalBackdrop").classList.remove("open");
+async function viewRawTranscript(id, name) {
+  currentMeetingId = id;
+  viewingRaw = true;
+  document.getElementById("detailEmpty").style.display = "none";
+  document.getElementById("detailHeader").style.display = "flex";
+  document.getElementById("detailEmailBar").style.display = "flex";
+  document.getElementById("detailBody").style.display = "flex";
+  document.getElementById("detailTitle").textContent = name;
+  document.getElementById("detailRecorded").textContent = "Raw Whisper output · read-only";
+  const editor = document.getElementById("transcriptEditor");
+  const status = document.getElementById("detailStatus");
+  editor.value = "Loading...";
+  editor.readOnly = true;
+  status.textContent = "";
+  document.getElementById("emailTo").value = "";
+  renderTable();
+  showMobileTab("transcript");
+  try {
+    const res = await fetch(`/api/meetings/${id}/raw_transcript`);
+    const text = await res.text();
+    editor.value = text;
+  } catch (e) {
+    editor.value = "Failed to load: " + e;
+  }
+}
+
+function closeDetail() {
+  currentMeetingId = null;
+  document.getElementById("detailEmpty").style.display = "flex";
+  document.getElementById("detailHeader").style.display = "none";
+  document.getElementById("detailEmailBar").style.display = "none";
+  document.getElementById("detailBody").style.display = "none";
+  renderTable();
+}
+
+/* ---------- Mobile tab bar ---------- */
+function showMobileTab(tab) {
+  document.getElementById("colBrand").classList.toggle("mobile-active", tab === "brand");
+  document.getElementById("colTable").classList.toggle("mobile-active", tab === "table");
+  document.getElementById("colTranscript").classList.toggle("mobile-active", tab === "transcript");
+  document.querySelectorAll(".mobile-tabs button").forEach(b => {
+    b.classList.toggle("active", b.dataset.tab === tab);
+  });
+}
+document.querySelectorAll(".mobile-tabs button").forEach(b => {
+  b.onclick = () => showMobileTab(b.dataset.tab);
+});
+
+async function saveTranscript(id, text) {
+  const status = document.getElementById("detailStatus");
+  status.textContent = "Saving...";
+  try {
+    const res = await fetch(`/api/meetings/${id}/transcript`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    status.textContent = res.ok ? "Saved" : "Save failed";
+  } catch (e) {
+    status.textContent = "Save failed: " + e;
+  }
+}
+
+document.getElementById("transcriptEditor").addEventListener("input", (e) => {
+  if (currentMeetingId === null || viewingRaw) return;
+  const id = currentMeetingId;
+  const text = e.target.value;
+  document.getElementById("detailStatus").textContent = "Editing...";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveTranscript(id, text), 800);
+});
+
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if (!ok) throw new Error("execCommand('copy') failed");
+}
+
+document.getElementById("copyBtn").onclick = async () => {
+  const text = document.getElementById("transcriptEditor").value;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      legacyCopy(text);
+    }
+    document.getElementById("detailStatus").textContent = "Copied to clipboard";
+  } catch (e) {
+    document.getElementById("detailStatus").textContent = "Copy failed: " + e;
+  }
 };
-document.getElementById("modalBackdrop").onclick = (e) => {
-  if (e.target.id === "modalBackdrop") e.target.classList.remove("open");
+
+document.getElementById("emailBtn").onclick = async () => {
+  const id = currentMeetingId;
+  if (id === null) return;
+  const to = document.getElementById("emailTo").value.trim();
+  const text = document.getElementById("transcriptEditor").value;
+  const status = document.getElementById("detailStatus");
+  if (!to) {
+    status.textContent = "Enter an email address first";
+    return;
+  }
+  status.textContent = "Sending...";
+  try {
+    const res = await fetch(`/api/meetings/${id}/email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, text }),
+    });
+    const data = await res.json();
+    status.textContent = res.ok ? `Sent to ${to}` : "Send failed: " + (data.error || res.statusText);
+  } catch (e) {
+    status.textContent = "Send failed: " + e;
+  }
 };
-document.getElementById("refreshBtn").onclick = fetchAll;
-document.getElementById("searchInput").oninput = renderSidebar;
+
+document.getElementById("detailClose").onclick = closeDetail;
+document.getElementById("searchInput").oninput = renderTable;
 
 fetchAll();
 setInterval(fetchAll, 5000);

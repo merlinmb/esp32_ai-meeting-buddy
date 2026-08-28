@@ -11,8 +11,8 @@ services:
     environment:
       - OUTPUT_DIR=/app/transcripts
     volumes:
-      - transcripts_data:/app/transcripts
-      - whisper_cache:/root/.cache/huggingface
+      - /home/merlin/portainer_data/ai-meeting-buddy/transcripts_data:/app/transcripts
+      - /home/merlin/portainer_data/ai-meeting-buddy/whisper_cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -21,6 +21,3 @@ services:
               count: all
               capabilities: [gpu]
 
-volumes:
-  transcripts_data:
-  whisper_cache:
