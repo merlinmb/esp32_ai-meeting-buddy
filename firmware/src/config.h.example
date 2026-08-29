@@ -23,8 +23,21 @@
 #define AUDIO_CHANNELS   1
 
 // ---- Behavior -----------------------------------------------------------
-#define AUTO_UPLOAD_WHEN_IDLE  true   // if true, device tries to flush pending recordings to WiFi whenever it's idle and not recording
+// Uploads run on their own FreeRTOS task (see upload_worker.h) rather than
+// inline in loop(), so a multi-hour upload never delays button polling or
+// LCD redraws. AUTO_UPLOAD_WHEN_IDLE (if true) makes that task retry
+// pending recordings on its own roughly every UPLOAD_RETRY_INTERVAL_MS
+// whenever nothing is recording - it doesn't wait for the idle *screen*
+// specifically, just for recording to stop, so it keeps working quietly
+// even while you're in the menu. If false, uploads only ever happen when
+// you pick "Upload now" from the menu.
+#define AUTO_UPLOAD_WHEN_IDLE  true
 #define UPLOAD_RETRY_INTERVAL_MS  (5UL * 60UL * 1000UL)  // don't hammer WiFi if the server is unreachable
+
+// Stack for the background upload task. It uses String/WiFiClient and a
+// 1KB read buffer, so give it real headroom - bump this if you ever see a
+// stack overflow panic naming "uploadWorker".
+#define UPLOAD_WORKER_STACK_BYTES  8192
 
 // Uploads are resumable: each file is sent as a series of UPLOAD_CHUNK_BYTES
 // POSTs, and before (re)starting a file the device asks the server how many
@@ -44,18 +57,16 @@
 //                                that's still moving data is never cut off.
 // UPLOAD_MAX_RETRIES is how many *consecutive* chunk failures a file's
 // upload tolerates before this pass gives up on it (leaving it pending for
-// the next automatic pass or a manual retry from the display) - since a
-// retry only costs one chunk (not the whole file), this doesn't need to be
-// generous.
+// the next automatic pass or "Upload now" from the menu) - since a retry
+// only costs one chunk (not the whole file), this doesn't need to be
+// generous. It's also what a recording button-press looks like from the
+// uploader's point of view: shouldAbort() firing bypasses this count
+// entirely and just parks the worker, it's never treated as a failure.
 #define UPLOAD_CHUNK_BYTES        262144UL   // 256 KB per chunk POST
 #define UPLOAD_SOCKET_TIMEOUT_MS  15000
 #define UPLOAD_STALL_TIMEOUT_MS   15000
 #define UPLOAD_MAX_RETRIES        3
 #define UPLOAD_RETRY_BACKOFF_MS   2000
-
-// How long the "upload failed - press: retry" screen sits before giving up
-// and returning to idle on its own (a manual short-press retries sooner).
-#define UPLOAD_FAILED_SCREEN_TIMEOUT_MS  (15UL * 1000UL)
 
 // ---- Menu ---------------------------------------------------------------
 #define MENU_IDLE_TIMEOUT_MS  (8UL * 1000UL)   // auto-return to idle if the menu sits untouched this long

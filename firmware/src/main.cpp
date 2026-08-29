@@ -34,10 +34,16 @@
 #include "wav_recorder.h"
 #include "ui_display.h"
 #include "record_button.h"
-#include "wifi_uploader.h"
+#include "spi_bus_mutex.h"
+#include "upload_worker.h"
 #include "audio_visualizer.h"
 
-enum class State { IDLE, RECORDING, UPLOADING, UPLOAD_FAILED, MENU, INFO };
+// The LCD and SD card share a SPI bus (see pins.h and spi_bus_mutex.h); this
+// is the one definition of the mutex declared extern there.
+SemaphoreHandle_t g_spiBusMutex = nullptr;
+void spiBusMutexBegin() { g_spiBusMutex = xSemaphoreCreateMutex(); }
+
+enum class State { IDLE, RECORDING, MENU, INFO };
 
 static State state = State::IDLE;
 
@@ -47,15 +53,14 @@ static Pcf85063 rtc;
 static WavRecorder recorder;
 static UiDisplay ui;
 static RecordButton button;
-static WifiUploader uploader;
+static UploadWorker uploadWorker;
 static AudioVisualizer visualizer;
 
 static bool sdOk = false;
 static unsigned long recordingStartMs = 0;
 static unsigned long lastIdleRedrawMs = 0;
-static unsigned long lastUploadAttemptMs = 0;
+static unsigned long lastUploadRedrawMs = 0;
 static uint32_t lastRecordingSeconds = 0;
-static unsigned long uploadFailedActivityMs = 0;
 
 static const std::vector<MenuItem> kMenuItems = {
   {"Upload now"},
@@ -82,15 +87,23 @@ bool hasPendingUploads() {
 }
 
 void startRecording() {
+  // Recording is this device's primary job: tell the upload worker to stand
+  // down before touching the SD card at all, so it can't still be mid-chunk
+  // (or about to open a file) when the recorder needs the bus a moment
+  // later. See upload_worker.h for how quickly it actually reacts to this.
+  uploadWorker.setRecordingActive(true);
+
   if (!sdOk) {
     ui.showMessage("SD card fault!\nInsert a card and\nrestart to record.");
     delay(1500);
+    uploadWorker.setRecordingActive(false);
     return;
   }
   String base = rtc.filenameTimestamp();
   if (!recorder.startNewFile(base)) {
     ui.showMessage("SD write failed!");
     delay(1500);
+    uploadWorker.setRecordingActive(false);
     return;
   }
   codec.mute(false);
@@ -104,6 +117,7 @@ void stopRecording() {
   recorder.close();
   codec.mute(true);
   state = State::IDLE;
+  uploadWorker.setRecordingActive(false);
 }
 
 void pumpAudioToSd() {
@@ -115,42 +129,6 @@ void pumpAudioToSd() {
   if (bytesRead > 0) {
     recorder.write(buf, bytesRead);
     visualizer.feed(buf, bytesRead);
-  }
-}
-
-// Puts up the "upload failed" screen and switches to it; short-press from
-// there retries immediately, long-press (or a timeout) dismisses to idle.
-void showUploadFailedScreen(int failedCount, int totalCount) {
-  uploadFailedActivityMs = millis();
-  state = State::UPLOAD_FAILED;
-  ui.showUploadFailed(failedCount, totalCount);
-}
-
-void tryUpload() {
-  if (!sdOk) return;
-  auto pending = WavRecorder::pendingFiles();
-  if (pending.empty()) return;
-
-  int total = (int)pending.size();
-  state = State::UPLOADING;
-  ui.showUploading(0, total);
-
-  if (!uploader.connect()) {
-    uploader.disconnect();
-    showUploadFailedScreen(total, total);
-    return;
-  }
-
-  int failed = uploader.uploadAllPending(pending, [](int done, int total) {
-    ui.showUploading(done, total);
-  });
-
-  uploader.disconnect();
-
-  if (failed > 0) {
-    showUploadFailedScreen(failed, total);
-  } else {
-    state = State::IDLE;
   }
 }
 
@@ -203,7 +181,10 @@ void runSelectedMenuItem() {
   String label = kMenuItems[menuSelectedIndex].label;
 
   if (label == "Upload now") {
-    tryUpload();  // sets state internally (UPLOADING -> IDLE or UPLOAD_FAILED)
+    // Non-blocking: just wakes the background upload worker. The idle
+    // screen picks up its progress/failure status on its own next redraw.
+    uploadWorker.requestUploadNow();
+    state = State::IDLE;
     return;
   }
   if (label == "Exit") {
@@ -222,6 +203,11 @@ void runSelectedMenuItem() {
 
 void setup() {
   Serial.begin(115200);
+
+  // Must exist before anything below touches the LCD or SD card, and
+  // definitely before the upload worker task (started at the end of this
+  // function) can start doing SD reads concurrently with loop().
+  spiBusMutexBegin();
 
   Wire.begin(PIN_CODEC_I2C_SDA, PIN_CODEC_I2C_SCL);  // shared bus - codec + RTC
   rtc.begin();
@@ -244,6 +230,7 @@ void setup() {
   }
 
   button.begin();
+  uploadWorker.begin();
 
   ui.showMessage("AI Meeting Buddy\nstarting up...");
   delay(800);
@@ -254,6 +241,12 @@ void loop() {
 
   switch (state) {
     case State::IDLE: {
+      // Recording always wins, instantly - regardless of what the idle
+      // screen happens to be showing (clock, upload progress, or a failure
+      // message). startRecording() tells the upload worker to stand down;
+      // it doesn't need to have finished standing down before we proceed
+      // here, since it never touches the LCD and any SD access it's still
+      // mid-chunk on serializes safely through the bus mutex.
       if (ev == ButtonEvent::SHORT) {
         startRecording();
         break;
@@ -262,7 +255,21 @@ void loop() {
         enterMenu();
         break;
       }
-      if (millis() - lastIdleRedrawMs > 1000) {
+
+      UploadWorker::Status ust = uploadWorker.getStatus();
+      if (ust.state != UploadWorker::State::PARKED) {
+        // Faster cadence than the plain clock so the progress bar feels
+        // live, but still throttled - this poll is cheap (atomics only),
+        // but the LCD redraw it triggers isn't free.
+        if (millis() - lastUploadRedrawMs > 250) {
+          lastUploadRedrawMs = millis();
+          if (ust.state == UploadWorker::State::FAILED) {
+            ui.showUploadFailed(ust.failedCount, ust.totalCount);
+          } else {
+            ui.showUploading(ust.doneCount, ust.totalCount);
+          }
+        }
+      } else if (millis() - lastIdleRedrawMs > 1000) {
         lastIdleRedrawMs = millis();
         RtcTime t;
         char clockBuf[16] = "--:--";
@@ -277,10 +284,6 @@ void loop() {
         }
         ui.showIdle(clockBuf, WiFi.status() == WL_CONNECTED, sdOk, sdFreePct, lastRecordingSeconds);
       }
-      if (AUTO_UPLOAD_WHEN_IDLE && (millis() - lastUploadAttemptMs > UPLOAD_RETRY_INTERVAL_MS)) {
-        lastUploadAttemptMs = millis();
-        tryUpload();
-      }
       break;
     }
 
@@ -294,21 +297,6 @@ void loop() {
       if (millis() - lastRedraw > 120) {  // fast enough for the waveform to feel live
         lastRedraw = millis();
         ui.showRecording((millis() - recordingStartMs) / 1000, visualizer);
-      }
-      break;
-    }
-
-    case State::UPLOADING:
-      // handled synchronously inside tryUpload(); nothing to do here
-      break;
-
-    case State::UPLOAD_FAILED: {
-      if (ev == ButtonEvent::SHORT) {
-        tryUpload();  // retry now; sets state internally again
-      } else if (ev == ButtonEvent::LONG) {
-        state = State::IDLE;
-      } else if (millis() - uploadFailedActivityMs > UPLOAD_FAILED_SCREEN_TIMEOUT_MS) {
-        state = State::IDLE;  // walked away - don't get stuck on this screen
       }
       break;
     }

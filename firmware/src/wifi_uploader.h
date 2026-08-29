@@ -2,14 +2,14 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <SD.h>
-#include <vector>
 #include <functional>
 #include "config.h"
+#include "spi_bus_mutex.h"
 
-// Connects to WiFi on demand, then POSTs pending WAV files to the companion
-// receiver script in small chunks (streamed from SD, not buffered in RAM),
-// then disconnects. Never runs during recording (see main.cpp's state
-// machine) - WiFi during I2S capture risks dropped audio samples.
+// Connects to WiFi on demand, then POSTs one pending WAV file to the
+// companion receiver script in small chunks (streamed from SD, not
+// buffered in RAM). Driven by upload_worker.h's background task, never
+// called from loop() directly.
 //
 // Only plain http:// is supported here to keep things simple. If your
 // server needs TLS, switch WiFiClient for WiFiClientSecure and add the
@@ -21,19 +21,33 @@
 // the previous chunk's response) rather than assuming - so a meeting
 // recording that's 2+ hours (100+ MB) resumes from wherever it left off
 // after a dropped connection, a device reboot, or the next periodic retry,
-// instead of restarting from byte 0. Every blocking wait is capped (see
-// config.h's UPLOAD_*_TIMEOUT_MS) so a stalled link fails a chunk fast
-// instead of hanging loop() long enough to trip the watchdog; only the
-// failed chunk needs retrying, not the whole file.
-
+// instead of restarting from byte 0.
+//
+// Every method here takes an AbortCheck callback, polled at every wait
+// point (WiFi association, the chunk-body stall watchdog, waiting on an
+// HTTP response) so the caller can interrupt an upload in progress -
+// upload_worker.h uses this to stand down the instant a recording starts.
+// The one exception is the underlying blocking TCP connect() syscall
+// itself, which isn't interruptible mid-call without a non-blocking
+// socket; that's bounded by UPLOAD_SOCKET_TIMEOUT_MS in the worst case,
+// same as every other network wait here.
 class WifiUploader {
  public:
-  bool connect() {
+  using AbortCheck = std::function<bool()>;
+
+  enum class UploadResult {
+    SUCCESS,   // file fully (re)sent and the server confirmed it
+    ABORTED,   // shouldAbort() fired - not a failure, just stood down
+    FAILED,    // ran out of per-chunk retries without shouldAbort() firing
+  };
+
+  bool connect(AbortCheck shouldAbort = nullptr) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+      if (shouldAbort && shouldAbort()) return false;
       delay(200);
     }
     return WiFi.status() == WL_CONNECTED;
@@ -44,29 +58,39 @@ class WifiUploader {
     WiFi.mode(WIFI_OFF);
   }
 
-  bool uploadFile(const String &path) {
+  UploadResult uploadFile(const String &path, AbortCheck shouldAbort) {
     String host, reqPath;
     int port;
-    if (!parseUrl(host, port, reqPath)) return false;
+    if (!parseUrl(host, port, reqPath)) return UploadResult::FAILED;
 
-    File probe = SD.open(path, FILE_READ);
-    if (!probe) return false;
-    size_t fileSize = probe.size();
-    probe.close();
+    size_t fileSize;
+    {
+      SpiBusGuard guard;
+      File probe = SD.open(path, FILE_READ);
+      if (!probe) return UploadResult::FAILED;
+      fileSize = probe.size();
+      probe.close();
+    }
 
     String fileName = baseName(path);
 
-    long resumeFrom = queryResumeOffset(host, port, reqPath, fileName);
+    long resumeFrom = queryResumeOffset(host, port, reqPath, fileName, shouldAbort);
     if (resumeFrom < 0) resumeFrom = 0;  // couldn't ask - start from 0, a 409 will correct us if that's wrong
-    if ((size_t)resumeFrom >= fileSize) return true;  // server already has the whole file
+    if ((size_t)resumeFrom >= fileSize) return UploadResult::SUCCESS;  // server already has the whole file
 
-    File f = SD.open(path, FILE_READ);
-    if (!f) return false;
+    File f;
+    {
+      SpiBusGuard guard;
+      f = SD.open(path, FILE_READ);
+    }
+    if (!f) return UploadResult::FAILED;
 
     size_t offset = (size_t)resumeFrom;
     int consecutiveFailures = 0;
-    bool ok = true;
+    UploadResult result = UploadResult::SUCCESS;
     while (offset < fileSize) {
+      if (shouldAbort && shouldAbort()) { result = UploadResult::ABORTED; break; }
+
       size_t chunkLen = min((size_t)UPLOAD_CHUNK_BYTES, fileSize - offset);
       bool isFinal = (offset + chunkLen) >= fileSize;
 
@@ -74,7 +98,7 @@ class WifiUploader {
       bool complete = false;
       int statusCode = 0;
       bool sent = sendChunk(host, port, reqPath, fileName, f, offset, chunkLen, isFinal,
-                             statusCode, serverBytes, complete);
+                             statusCode, serverBytes, complete, shouldAbort);
 
       if (sent && statusCode == 200 && serverBytes == (long)(offset + chunkLen)) {
         offset += chunkLen;
@@ -93,42 +117,21 @@ class WifiUploader {
         continue;
       }
 
+      if (shouldAbort && shouldAbort()) { result = UploadResult::ABORTED; break; }
+
       consecutiveFailures++;
-      if (consecutiveFailures > UPLOAD_MAX_RETRIES) { ok = false; break; }
+      if (consecutiveFailures > UPLOAD_MAX_RETRIES) { result = UploadResult::FAILED; break; }
       delay(UPLOAD_RETRY_BACKOFF_MS);
     }
 
-    f.close();
-    return ok;
-  }
-
-  // Uploads every pending file; calls onProgress(doneCount, total) after each.
-  // Returns the count of files that failed all their retries (0 = clean pass).
-  int uploadAllPending(std::vector<String> &files, std::function<void(int, int)> onProgress = nullptr) {
-    int done = 0;
-    int failed = 0;
-    for (auto &path : files) {
-      if (uploadFile(path)) {
-        markDone(path);
-      } else {
-        failed++;
-      }
-      done++;
-      if (onProgress) onProgress(done, (int)files.size());
-    }
-    return failed;
+    { SpiBusGuard guard; f.close(); }
+    return result;
   }
 
  private:
   static String baseName(const String &path) {
     int idx = path.lastIndexOf('/');
     return idx >= 0 ? path.substring(idx + 1) : path;
-  }
-
-  static void markDone(const String &wavPath) {
-    String donePath = wavPath.substring(0, wavPath.length() - 4) + ".done";
-    File f = SD.open(donePath, FILE_WRITE);
-    if (f) f.close();
   }
 
   bool parseUrl(String &host, int &port, String &reqPath) {
@@ -149,8 +152,12 @@ class WifiUploader {
   // endpoints only ever return a short plain-text body (see
   // receive_and_transcribe.py), so this doesn't need to understand
   // Content-Length or chunked transfer encoding on the way back.
-  static bool readHttpResponse(WiFiClient &client, unsigned long deadlineMs, int &statusCode, String &body) {
-    while (client.connected() && !client.available() && millis() < deadlineMs) delay(10);
+  static bool readHttpResponse(WiFiClient &client, unsigned long deadlineMs, int &statusCode,
+                                String &body, const AbortCheck &shouldAbort) {
+    while (client.connected() && !client.available() && millis() < deadlineMs) {
+      if (shouldAbort && shouldAbort()) return false;
+      delay(10);
+    }
     if (!client.available()) return false;
 
     String statusLine = client.readStringUntil('\n');
@@ -161,12 +168,14 @@ class WifiUploader {
 
     while (millis() < deadlineMs) {
       if (!client.connected() && !client.available()) break;
+      if (shouldAbort && shouldAbort()) return false;
       String line = client.readStringUntil('\n');
       if (line.length() == 0 || line == "\r") break;  // blank line = end of headers
     }
 
     body = "";
     while ((client.connected() || client.available()) && millis() < deadlineMs) {
+      if (shouldAbort && shouldAbort()) return false;
       while (client.available()) body += (char)client.read();
       if (!client.connected() && !client.available()) break;
       delay(5);
@@ -177,7 +186,8 @@ class WifiUploader {
   // Returns bytes already stored server-side for fileName (0 if none), or
   // -1 on any network/parse failure (the caller falls back to offset 0 and
   // lets a 409 on the first chunk correct it).
-  long queryResumeOffset(const String &host, int port, const String &reqPath, const String &fileName) {
+  long queryResumeOffset(const String &host, int port, const String &reqPath,
+                          const String &fileName, const AbortCheck &shouldAbort) {
     WiFiClient client;
     client.setTimeout(UPLOAD_SOCKET_TIMEOUT_MS);
     if (!client.connect(host.c_str(), port)) return -1;
@@ -193,7 +203,7 @@ class WifiUploader {
 
     int statusCode = 0;
     String body;
-    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body);
+    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body, shouldAbort);
     client.stop();
     if (!ok || statusCode != 200) return -1;
     return body.toInt();
@@ -202,11 +212,12 @@ class WifiUploader {
   // Sends [offset, offset+len) of the open file as one chunk POST. Returns
   // true whenever a well-formed HTTP response came back (including a 409
   // offset-mismatch - the caller resyncs to serverBytesReceived rather than
-  // treating that as a failure); returns false only when no usable response
-  // came back at all (dropped connection, stalled write, timeout).
+  // treating that as a failure); returns false when no usable response came
+  // back at all (dropped connection, stalled write, timeout, or an abort).
   bool sendChunk(const String &host, int port, const String &reqPath, const String &fileName,
                  File &f, size_t offset, size_t len, bool isFinal,
-                 int &statusCode, long &serverBytesReceived, bool &complete) {
+                 int &statusCode, long &serverBytesReceived, bool &complete,
+                 const AbortCheck &shouldAbort) {
     WiFiClient client;
     client.setTimeout(UPLOAD_SOCKET_TIMEOUT_MS);
     if (!client.connect(host.c_str(), port)) return false;
@@ -223,22 +234,25 @@ class WifiUploader {
     client.println("Connection: close");
     client.println();
 
-    f.seek(offset);
+    { SpiBusGuard guard; f.seek(offset); }
 
-    // Same stall-watchdog approach as before, just scoped to one chunk now:
-    // the clock resets on every buffer actually written, so it only fires
-    // if the link genuinely stops accepting data mid-chunk.
+    // Stall watchdog: the clock resets on every buffer actually written, so
+    // it only fires if the link genuinely stops accepting data mid-chunk -
+    // or shouldAbort() fires, letting a recording button-press cut this
+    // short within about one 1KB buffer instead of waiting out the chunk.
     bool streamOk = true;
     unsigned long lastProgressMs = millis();
     size_t sentBytes = 0;
     uint8_t buf[1024];
     while (sentBytes < len) {
-      if (!client.connected() || (millis() - lastProgressMs) > UPLOAD_STALL_TIMEOUT_MS) {
+      if (!client.connected() || (millis() - lastProgressMs) > UPLOAD_STALL_TIMEOUT_MS ||
+          (shouldAbort && shouldAbort())) {
         streamOk = false;
         break;
       }
       size_t want = min((size_t)sizeof(buf), len - sentBytes);
-      size_t n = f.read(buf, want);
+      size_t n;
+      { SpiBusGuard guard; n = f.read(buf, want); }
       if (n == 0) { streamOk = false; break; }  // unexpected SD read failure
       size_t written = client.write(buf, n);
       if (written != n) { streamOk = false; break; }
@@ -250,7 +264,7 @@ class WifiUploader {
     if (!streamOk) { client.stop(); return false; }
 
     String body;
-    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body);
+    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body, shouldAbort);
     client.stop();
     if (!ok) return false;
 

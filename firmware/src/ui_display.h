@@ -4,10 +4,18 @@
 #include <vector>
 #include "pins.h"
 #include "audio_visualizer.h"
+#include "spi_bus_mutex.h"
 
 // Status/menu UI for the 240x280 ST7789. Everything's drawn with primitive
 // shapes + text (no image assets), organized as a few full-screen "views" so
 // each state in main.cpp maps to exactly one draw call.
+//
+// Every public show*() method below takes SpiBusGuard for its whole draw:
+// the LCD and SD card share the same SPI bus pins (see pins.h), and
+// upload_worker.h's background task now reads SD concurrently with
+// whatever loop() is drawing, so a full screen redraw needs to complete as
+// one atomic bus transaction rather than interleave with an SD access -
+// see spi_bus_mutex.h.
 
 struct MenuItem {
   const char *label;
@@ -40,6 +48,7 @@ class UiDisplay {
 
   // ---- Idle: big clock, wifi status, SD space ring, last recording card --
   void showIdle(const String &clockStr, bool wifiConnected, bool sdOk, float sdFreePct, uint32_t lastRecordingSeconds) {
+    SpiBusGuard guard;
     _gfx->fillScreen(_bg);
 
     // Big vibrant clock, top-left aligned like the reference watch face.
@@ -93,6 +102,7 @@ class UiDisplay {
 
   // ---- Recording: live waveform + elapsed time -------------------------
   void showRecording(uint32_t elapsedSeconds, const AudioVisualizer &viz) {
+    SpiBusGuard guard;
     beginFrame(nullptr);
 
     // Pulsing-looking rec dot + label (no real animation needed, just a
@@ -118,6 +128,7 @@ class UiDisplay {
 
   // ---- Upload progress ---------------------------------------------------
   void showUploading(int doneCount, int totalCount) {
+    SpiBusGuard guard;
     beginFrame("UPLOADING");
 
     _gfx->setTextColor(_text);
@@ -133,10 +144,16 @@ class UiDisplay {
       int fillW = (int)((barW - 4) * ((float)doneCount / (float)totalCount));
       _gfx->fillRoundRect(barX + 2, barY + 2, fillW, barH - 4, 3, _accent);
     }
+
+    // Recording still wins instantly even with an upload in flight (see
+    // upload_worker.h), so the footer matches the idle screen's, not a
+    // pause/cancel prompt.
+    drawFooter("press: record", "hold: menu");
   }
 
-  // ---- Upload failed: lets the user retry or dismiss ---------------------
+  // ---- Upload failed: shown until the next retry (auto or from the menu) -
   void showUploadFailed(int failedCount, int totalCount) {
+    SpiBusGuard guard;
     beginFrame("UPLOAD FAILED");
 
     int sentCount = totalCount - failedCount;
@@ -148,13 +165,16 @@ class UiDisplay {
 
     _gfx->setTextColor(_muted);
     _gfx->setTextSize(2);
-    centerText("Check WiFi/server", 140);
+    centerText("Will auto-retry", 140);
 
-    drawFooter("press: retry", "hold: back");
+    // Same button behavior as idle - this is just an informational overlay,
+    // not a separate screen with its own gestures.
+    drawFooter("press: record", "hold: menu");
   }
 
   // ---- Menu: scrollable single-column list, one item highlighted --------
   void showMenu(const std::vector<MenuItem> &items, int selectedIndex) {
+    SpiBusGuard guard;
     beginFrame("MENU");
 
     int y = 60;
@@ -175,6 +195,7 @@ class UiDisplay {
   }
 
   void showInfo(const String &title, const std::vector<String> &lines) {
+    SpiBusGuard guard;
     beginFrame(title.c_str());
     int y = 70;
     _gfx->setTextSize(2);
@@ -188,6 +209,7 @@ class UiDisplay {
   }
 
   void showMessage(const String &msg) {
+    SpiBusGuard guard;
     beginFrame(nullptr);
     _gfx->setTextColor(_text);
     _gfx->setTextSize(2);

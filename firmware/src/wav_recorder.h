@@ -5,11 +5,18 @@
 #include <vector>
 #include "pins.h"
 #include "config.h"
+#include "spi_bus_mutex.h"
 
 // Handles: SD init, opening a new WAV file, writing PCM buffers, and
 // finalizing the WAV header (file size isn't known until recording stops,
 // so the 44-byte header is written twice - once as a placeholder, once with
 // real sizes at close()).
+//
+// Every SD access here is guarded by SpiBusGuard: the LCD and SD card share
+// the same SPI bus pins (see pins.h), and upload_worker.h's background task
+// also reads SD while loop() may be redrawing the LCD or (via this class)
+// writing an in-progress recording, so all of it needs to serialize on the
+// same mutex - see spi_bus_mutex.h.
 
 #pragma pack(push, 1)
 struct WavHeader {
@@ -32,12 +39,14 @@ struct WavHeader {
 class WavRecorder {
  public:
   bool beginSd() {
+    SpiBusGuard guard;
     SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     return SD.begin(PIN_SD_CS);
   }
 
   // Starts a new recording; filenameBase should NOT include ".wav".
   bool startNewFile(const String &filenameBase) {
+    SpiBusGuard guard;
     _path = "/" + filenameBase + ".wav";
     _file = SD.open(_path, FILE_WRITE);
     if (!_file) return false;
@@ -52,6 +61,7 @@ class WavRecorder {
 
   size_t write(const uint8_t *buf, size_t len) {
     if (!_file) return 0;
+    SpiBusGuard guard;
     size_t n = _file.write(buf, len);
     _bytesWritten += n;
     return n;
@@ -60,6 +70,7 @@ class WavRecorder {
   // Rewrites the header with real sizes and closes the file.
   void close() {
     if (!_file) return;
+    SpiBusGuard guard;
     WavHeader hdr;
     hdr.dataSize = _bytesWritten;
     hdr.chunkSize = 36 + _bytesWritten;
@@ -73,6 +84,7 @@ class WavRecorder {
 
   // Lists .wav files on the card that don't yet have a matching ".done" marker.
   static std::vector<String> pendingFiles() {
+    SpiBusGuard guard;
     std::vector<String> out;
     File root = SD.open("/");
     if (!root) return out;
@@ -91,6 +103,7 @@ class WavRecorder {
   }
 
   static void markUploaded(const String &wavPath) {
+    SpiBusGuard guard;
     String donePath = wavPath.substring(0, wavPath.length() - 4) + ".done";
     File f = SD.open(donePath, FILE_WRITE);
     if (f) f.close();
