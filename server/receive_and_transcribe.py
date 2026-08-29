@@ -547,6 +547,20 @@ def retry_meeting(meeting_id):
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/api/meetings/<int:meeting_id>/audio", methods=["GET"])
+@login_required
+def get_audio(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting:
+        abort(404)
+    path = Path(meeting["wav_path"])
+    if not path.exists():
+        abort(404)
+    # conditional=True lets the browser's <audio> element seek via HTTP Range
+    # requests instead of downloading the whole WAV before playback can start.
+    return send_file(path, mimetype="audio/wav", conditional=True)
+
+
 @app.route("/api/meetings/<int:meeting_id>/transcript", methods=["GET"])
 @login_required
 def get_transcript(meeting_id):
