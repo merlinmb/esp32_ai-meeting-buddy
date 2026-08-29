@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Meeting Buddy - Sign in</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A==" crossorigin="anonymous" referrerpolicy="no-referrer">
+<style>
+  :root {
+    --bg: #0a0b10;
+    --panel: #14161f;
+    --panel-2: #191c27;
+    --border: #262a38;
+    --text: #eef0f6;
+    --text-dim: #9aa1b5;
+    --text-faint: #676e82;
+    --accent: #8b7bff;
+    --accent-2: #5ee6d8;
+    --accent-glow: rgba(139, 123, 255, 0.35);
+    --err: #ff5c72;
+    --radius-lg: 16px;
+    --radius-md: 12px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(139, 123, 255, 0.16), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(94, 230, 216, 0.10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+  }
+  .card {
+    width: 100%;
+    max-width: 360px;
+    margin: 20px;
+    background: linear-gradient(160deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 32px 28px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 24px;
+  }
+  .brand .mark {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    box-shadow: 0 0 24px var(--accent-glow);
+    flex-shrink: 0;
+  }
+  .brand .name { font-weight: 700; font-size: 1rem; letter-spacing: -0.01em; }
+  .brand .name small { display: block; font-weight: 400; color: var(--text-faint); font-size: 0.72rem; margin-top: 1px; }
+
+  h1 { margin: 0 0 20px; font-size: 1.1rem; font-weight: 600; }
+
+  label {
+    display: block;
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+  input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 11px 13px;
+    border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+    outline: none;
+    margin-bottom: 16px;
+  }
+  input:focus { border-color: var(--accent); }
+
+  button {
+    width: 100%;
+    border: none;
+    background: linear-gradient(135deg, var(--accent), #6f5fe0);
+    color: #fff;
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+
+  .error {
+    background: rgba(255, 92, 114, 0.12);
+    border: 1px solid rgba(255, 92, 114, 0.3);
+    color: var(--err);
+    padding: 10px 13px;
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    margin-bottom: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">
+    <div class="mark"><i class="fa-solid fa-microphone"></i></div>
+    <div class="name">Meeting Buddy<small>Receiver console</small></div>
+  </div>
+  <h1>Sign in</h1>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>

@@ -2,8 +2,16 @@
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _now_iso() -> str:
+    """UTC timestamp with an explicit offset, so the browser (new Date(...))
+    converts it to the viewer's local timezone instead of misreading a naive
+    string as if it were already local time."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 STATUS_RECEIVED = "received"
 STATUS_TRANSCRIBING = "transcribing"
@@ -55,7 +63,7 @@ class MeetingStore:
             conn.close()
 
     def create(self, meeting_name: str, wav_path: str, wav_bytes: int = None) -> int:
-        now = datetime.now().isoformat(timespec="seconds")
+        now = _now_iso()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO meetings (meeting_name, status, received_at, updated_at, wav_path, wav_bytes) "
@@ -65,7 +73,7 @@ class MeetingStore:
             return cur.lastrowid
 
     def update_status(self, meeting_id: int, status: str, error: str = None):
-        now = datetime.now().isoformat(timespec="seconds")
+        now = _now_iso()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE meetings SET status = ?, updated_at = ?, error = ? WHERE id = ?",
@@ -73,7 +81,7 @@ class MeetingStore:
             )
 
     def save_raw_transcript(self, meeting_id: int, raw_transcript: str):
-        now = datetime.now().isoformat(timespec="seconds")
+        now = _now_iso()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE meetings SET raw_transcript = ?, updated_at = ? WHERE id = ?",
@@ -81,7 +89,7 @@ class MeetingStore:
             )
 
     def save_result(self, meeting_id: int, transcript_path: str):
-        now = datetime.now().isoformat(timespec="seconds")
+        now = _now_iso()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE meetings SET status = ?, transcript_path = ?, updated_at = ?, error = NULL WHERE id = ?",
@@ -104,7 +112,7 @@ class MeetingStore:
             return [dict(r) for r in rows]
 
     def set_archived(self, meeting_id: int, archived: bool):
-        now = datetime.now().isoformat(timespec="seconds")
+        now = _now_iso()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE meetings SET archived = ?, updated_at = ? WHERE id = ?",

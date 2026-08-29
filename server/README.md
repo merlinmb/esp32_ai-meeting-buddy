@@ -35,8 +35,21 @@ If you use this instead of the Docker deployment, update the firmware's `UPLOAD_
 ## Configuration (`.env`)
 
 - `ANTHROPIC_API_KEY` - required. Get one at https://console.anthropic.com/
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD` - required. Login for the dashboard (the web UI). Pick a real password before deploying anywhere reachable off your own machine.
+- `UPLOAD_TOKEN` - required. Shared secret the ESP32 device must send to `POST /upload`; separate from the dashboard login since the device can't do a browser login flow. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"` and put the same value in `firmware/src/config.h`'s `UPLOAD_TOKEN`.
+- `FLASK_SECRET_KEY` - required. Signs session cookies. Generate the same way as `UPLOAD_TOKEN`.
+- `BEHIND_HTTPS_PROXY` - set to `true` once this is deployed behind a reverse proxy that terminates HTTPS (nginx, Caddy, Cloudflare Tunnel, etc.). Makes session cookies HTTPS-only, enables HSTS, and switches the app to a production WSGI server (waitress) instead of Flask's dev server. Leave `false` for local `http://` testing.
 - `WHISPER_MODEL` - `small` is a good default; use `base` if transcription is too slow, `medium`/`large-v3` for better accuracy if the machine (savage.local) has the CPU/RAM or a GPU for it.
 - Email settings only if you want transcripts emailed rather than (or in addition to) saved.
+
+## Exposing this publicly
+
+This app is only as secure as the deployment around it:
+
+- Put a reverse proxy in front that terminates HTTPS (Caddy is the easiest - automatic Let's Encrypt certs with a two-line config; nginx or Cloudflare Tunnel also work). Set `BEHIND_HTTPS_PROXY=true` once that's in place.
+- Set a real `ADMIN_PASSWORD` - not the placeholder in `.env.example`.
+- Keep `UPLOAD_TOKEN` and `FLASK_SECRET_KEY` secret; anyone with `UPLOAD_TOKEN` can submit audio for transcription (burning your Claude API budget), and anyone with `FLASK_SECRET_KEY` can forge login sessions.
+- `.env` itself must never be committed - it already is gitignored, double check before pushing.
 
 ## Swapping in a hosted transcription API
 

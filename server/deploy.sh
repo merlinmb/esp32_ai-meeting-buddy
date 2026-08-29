@@ -15,7 +15,8 @@
 #
 # Usage:
 #   ./deploy.sh setup              # one-time: register the remote context
-#   ./deploy.sh deploy              # build + (re)start on savage.local
+#   ./deploy.sh deploy              # fast path: rebuild changed layers + (re)start
+#   ./deploy.sh deploy --full       # full rebuild: --no-cache, then recreate container
 #   ./deploy.sh logs                # tail the remote container's logs
 #   ./deploy.sh down                # stop the remote container
 #   ./deploy.sh pull-transcripts    # copy transcripts to ./transcripts_from_savage
@@ -60,7 +61,13 @@ case "$cmd" in
       echo "No .env found here - copy .env.example to .env and fill in ANTHROPIC_API_KEY first." >&2
       exit 1
     fi
-    docker --context "$CONTEXT_NAME" compose -f "$COMPOSE_FILE" up -d --build
+    if [ "${2:-}" = "--full" ]; then
+      echo "Full deploy: rebuilding all layers from scratch and recreating the container..."
+      docker --context "$CONTEXT_NAME" compose -f "$COMPOSE_FILE" build --no-cache
+      docker --context "$CONTEXT_NAME" compose -f "$COMPOSE_FILE" up -d --force-recreate
+    else
+      docker --context "$CONTEXT_NAME" compose -f "$COMPOSE_FILE" up -d --build
+    fi
     echo
     echo "Deployed. Receiver should be reachable at http://${REMOTE_HOST}:8787/health"
     echo "Point the firmware's UPLOAD_SERVER_URL in config.h at http://${REMOTE_HOST}:8787/upload"

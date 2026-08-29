@@ -93,6 +93,7 @@ class WifiUploader {
     client.printf("Host: %s\r\n", host.c_str());
     client.println("Content-Type: multipart/form-data; boundary=AIMeetingBuddyBoundary");
     client.printf("Content-Length: %u\r\n", (unsigned)totalLen);
+    client.printf("X-Upload-Token: %s\r\n", UPLOAD_TOKEN);
     client.println("Connection: close");
     client.println();
     client.print(head);

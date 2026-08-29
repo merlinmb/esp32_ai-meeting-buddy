@@ -13,8 +13,20 @@ param(
     [string]$ServerUrl
 )
 
+$envPath = Join-Path $PSScriptRoot "..\.env"
+$uploadToken = ""
+if (Test-Path $envPath) {
+    $tokenMatch = Select-String -Path $envPath -Pattern '^\s*UPLOAD_TOKEN\s*=\s*(\S+)' | Select-Object -First 1
+    if ($tokenMatch) {
+        $uploadToken = $tokenMatch.Matches[0].Groups[1].Value
+    }
+}
+if (-not $uploadToken) {
+    Write-Error "UPLOAD_TOKEN not found in $envPath - the server will reject this upload."
+    exit 1
+}
+
 if (-not $ServerUrl) {
-    $envPath = Join-Path $PSScriptRoot "..\.env"
     $port = "8787"
     if (Test-Path $envPath) {
         $match = Select-String -Path $envPath -Pattern '^\s*UPLOAD_PORT\s*=\s*(\S+)' | Select-Object -First 1
@@ -55,6 +67,7 @@ $bodyBytes = $encoding.GetBytes($bodyLines)
 try {
     $response = Invoke-WebRequest -Uri $UploadUrl -Method Post `
         -ContentType "multipart/form-data; boundary=$boundary" `
+        -Headers @{ "X-Upload-Token" = $uploadToken } `
         -Body $bodyBytes
     Write-Host "Status: $($response.StatusCode)"
     Write-Host "Response: $($response.Content)"

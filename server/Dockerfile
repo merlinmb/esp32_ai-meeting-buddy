@@ -1,8 +1,10 @@
-FROM python:3.11-slim
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 # ffmpeg is needed by faster-whisper/ctranslate2's audio decoding path.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,4 +20,4 @@ EXPOSE 8787
 # Unbuffered stdout so `docker compose logs -f` shows prints immediately.
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "receive_and_transcribe.py"]
+CMD ["python3", "receive_and_transcribe.py"]

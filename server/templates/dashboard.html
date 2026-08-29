@@ -201,6 +201,8 @@
   .hero-card.failed .icon { background: rgba(255, 92, 114, 0.16); color: var(--err); }
   .hero-card.archived { --glow-color: rgba(154, 161, 181, 0.30); }
   .hero-card.archived .icon { background: rgba(154, 161, 181, 0.16); color: var(--text-dim); }
+  .hero-card.queue { --glow-color: rgba(94, 189, 255, 0.30); cursor: default; }
+  .hero-card.queue .icon { background: rgba(94, 189, 255, 0.16); color: #5ebdff; }
 
   /* ---------- Table panel ---------- */
   .panel {
@@ -574,16 +576,14 @@
         <div class="mark"><i class="fa-solid fa-microphone"></i></div>
         <div class="name">Meeting Buddy<small>Receiver console</small></div>
       </div>
-    </div>
-
-    <div class="page-header">
-      <h1>Dashboard</h1>
-      <div class="sub">Recordings received from the field unit, transcribed and cleaned up by Claude.</div>
+      <form method="post" action="/logout" style="margin-left:auto">
+        <button type="submit" class="btn" title="Sign out"><i class="fa-solid fa-right-from-bracket"></i></button>
+      </form>
     </div>
 
     <div class="record-box">
       <button class="btn primary record-btn" id="recordBtn"><i class="fa-solid fa-circle"></i> <span id="recordBtnLabel">Record meeting</span></button>
-      <div class="record-hint" id="recordHint">Records from your microphone.</div>
+      <div class="record-hint" id="recordHint"></div>
     </div>
 
     <div class="hero-grid">
@@ -611,6 +611,11 @@
         <div class="label"><span class="icon"><i class="fa-solid fa-box-archive"></i></span> Archived</div>
         <div class="value" id="statArchived">–</div>
         <div class="footnote">Removed from the active list</div>
+      </div>
+      <div class="hero-card queue">
+        <div class="label"><span class="icon"><i class="fa-solid fa-list-ol"></i></span> Processing queue</div>
+        <div class="value" id="statQueue">–</div>
+        <div class="footnote" id="statQueueNote">–</div>
       </div>
     </div>
   </div>
@@ -770,6 +775,10 @@ async function fetchAll() {
     fetch("/api/meetings?q=" + encodeURIComponent(query) + archivedParam),
     fetch("/api/stats"),
   ]);
+  if (meetingsRes.status === 401 || statsRes.status === 401) {
+    window.location.href = "/login";
+    return;
+  }
   allMeetings = await meetingsRes.json();
   const stats = await statsRes.json();
   renderStats(stats);
@@ -798,6 +807,10 @@ function renderStats(stats) {
   document.getElementById("statFailed").textContent = stats.failed;
   document.getElementById("statBytes").textContent = fmtBytes(stats.total_bytes) + " received";
   document.getElementById("statArchived").textContent = stats.archived;
+  document.getElementById("statQueue").textContent = stats.queue_length;
+  document.getElementById("statQueueNote").textContent = stats.queue_length > 0
+    ? "Whisper/LLM jobs run one at a time"
+    : "Idle";
 }
 
 function renderTable() {
@@ -825,6 +838,7 @@ function renderTable() {
   rows.innerHTML = filtered.map(m => {
     const status = m.status;
     const canRetry = !!m.raw_transcript;
+    const canRetranscribe = status === "failed" && !m.raw_transcript;
     return `
       <tr id="row-${m.id}" class="${m.id === currentMeetingId ? 'active' : ''}" onclick="rowClicked(event, ${m.id})">
         <td class="name">
@@ -845,7 +859,9 @@ function renderTable() {
             ${m.archived
               ? `<button class="icon-btn table-icon-btn" title="Restore from archive" onclick="event.stopPropagation(); unarchiveMeeting(${m.id})"><i class="fa-solid fa-box-open"></i></button>`
               : `<button class="icon-btn table-icon-btn danger" title="Archive this recording" onclick="event.stopPropagation(); archiveMeeting(${m.id})"><i class="fa-solid fa-trash"></i></button>
-            <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="event.stopPropagation(); retryMeeting(${m.id}, this)">Resubmit</button>`}
+            ${canRetranscribe
+              ? `<button class="btn primary" onclick="event.stopPropagation(); retranscribeMeeting(${m.id}, this)">Retranscribe</button>`
+              : `<button class="btn primary" ${canRetry ? "" : "disabled"} onclick="event.stopPropagation(); retryMeeting(${m.id}, this)">Resubmit</button>`}`}
           </div>
         </td>
       </tr>
@@ -868,17 +884,42 @@ function escapeAttr(s) {
   return String(s).replace(/'/g, "\\'");
 }
 
+async function handleApiError(res, actionLabel) {
+  if (res.status === 401) {
+    alert("Your session has expired - please log in again.");
+    window.location.href = "/login";
+    return;
+  }
+  const err = await res.json().catch(() => ({}));
+  alert(`${actionLabel} failed: ` + (err.error || res.statusText));
+}
+
 async function retryMeeting(id, btn) {
   btn.disabled = true;
   btn.textContent = "Resubmitting...";
   try {
     const res = await fetch(`/api/meetings/${id}/retry`, { method: "POST" });
     if (!res.ok) {
-      const err = await res.json();
-      alert("Resubmit failed: " + (err.error || res.statusText));
+      await handleApiError(res, "Resubmit");
+      return;
     }
   } catch (e) {
     alert("Resubmit failed: " + e);
+  }
+  await fetchAll();
+}
+
+async function retranscribeMeeting(id, btn) {
+  btn.disabled = true;
+  btn.textContent = "Retranscribing...";
+  try {
+    const res = await fetch(`/api/meetings/${id}/retranscribe`, { method: "POST" });
+    if (!res.ok) {
+      await handleApiError(res, "Retranscribe");
+      return;
+    }
+  } catch (e) {
+    alert("Retranscribe failed: " + e);
   }
   await fetchAll();
 }

@@ -14,7 +14,8 @@
 #
 # Usage:
 #   .\deploy.ps1 setup              # one-time: register the remote context
-#   .\deploy.ps1 deploy              # build + (re)start on savage.local
+#   .\deploy.ps1 deploy              # fast path: rebuild changed layers + (re)start
+#   .\deploy.ps1 deploy --full       # full rebuild: --no-cache, then recreate container
 #   .\deploy.ps1 logs                # tail the remote container's logs
 #   .\deploy.ps1 down                # stop the remote container
 #   .\deploy.ps1 pull-transcripts    # copy transcripts to .\transcripts_from_savage
@@ -24,7 +25,10 @@
 
 param(
     [Parameter(Position = 0)]
-    [string]$Command
+    [string]$Command,
+
+    [Parameter(Position = 1)]
+    [string]$Flag
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,7 +86,14 @@ switch ($Command) {
             Write-Error "No .env found here - copy .env.example to .env and fill in ANTHROPIC_API_KEY first."
             exit 1
         }
-        docker --context $ContextName compose -f $ComposeFile up -d --build
+        if ($Flag -eq "--full") {
+            Write-Host "Full deploy: rebuilding all layers from scratch and recreating the container..."
+            docker --context $ContextName compose -f $ComposeFile build --no-cache
+            docker --context $ContextName compose -f $ComposeFile up -d --force-recreate
+        }
+        else {
+            docker --context $ContextName compose -f $ComposeFile up -d --build
+        }
         Write-Host ""
         Write-Host "Deployed. Receiver should be reachable at http://${RemoteHost}:8787/health"
         Write-Host "Point the firmware's UPLOAD_SERVER_URL in config.h at http://${RemoteHost}:8787/upload"
