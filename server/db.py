@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     wav_bytes INTEGER,
     raw_transcript TEXT,
     transcript_path TEXT,
-    error TEXT
+    error TEXT,
+    archived INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -31,6 +32,9 @@ def init_db(db_path: Path):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(_SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
+    if "archived" not in columns:
+        conn.execute("ALTER TABLE meetings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -89,35 +93,54 @@ class MeetingStore:
             row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
             return dict(row) if row else None
 
-    def list_all(self):
+    def list_all(self, include_archived: bool = False):
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM meetings ORDER BY id DESC").fetchall()
+            if include_archived:
+                rows = conn.execute("SELECT * FROM meetings ORDER BY id DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM meetings WHERE archived = 0 ORDER BY id DESC"
+                ).fetchall()
             return [dict(r) for r in rows]
+
+    def set_archived(self, meeting_id: int, archived: bool):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE meetings SET archived = ?, updated_at = ? WHERE id = ?",
+                (1 if archived else 0, now, meeting_id),
+            )
 
     def stats(self):
         with self._connect() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM meetings").fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM meetings WHERE archived = 0"
+            ).fetchone()[0]
             completed = conn.execute(
-                "SELECT COUNT(*) FROM meetings WHERE status = ?", (STATUS_COMPLETED,)
+                "SELECT COUNT(*) FROM meetings WHERE archived = 0 AND status = ?", (STATUS_COMPLETED,)
             ).fetchone()[0]
             failed = conn.execute(
-                "SELECT COUNT(*) FROM meetings WHERE status = ?", (STATUS_FAILED,)
+                "SELECT COUNT(*) FROM meetings WHERE archived = 0 AND status = ?", (STATUS_FAILED,)
             ).fetchone()[0]
             in_progress = conn.execute(
-                "SELECT COUNT(*) FROM meetings WHERE status IN (?, ?, ?)",
+                "SELECT COUNT(*) FROM meetings WHERE archived = 0 AND status IN (?, ?, ?)",
                 (STATUS_RECEIVED, STATUS_TRANSCRIBING, STATUS_SUMMARIZING),
             ).fetchone()[0]
+            archived = conn.execute(
+                "SELECT COUNT(*) FROM meetings WHERE archived = 1"
+            ).fetchone()[0]
             total_bytes = conn.execute(
-                "SELECT COALESCE(SUM(wav_bytes), 0) FROM meetings"
+                "SELECT COALESCE(SUM(wav_bytes), 0) FROM meetings WHERE archived = 0"
             ).fetchone()[0]
             last_received = conn.execute(
-                "SELECT received_at FROM meetings ORDER BY id DESC LIMIT 1"
+                "SELECT received_at FROM meetings WHERE archived = 0 ORDER BY id DESC LIMIT 1"
             ).fetchone()
             return {
                 "total": total,
                 "completed": completed,
                 "failed": failed,
                 "in_progress": in_progress,
+                "archived": archived,
                 "total_bytes": total_bytes,
                 "last_received": last_received[0] if last_received else None,
             }

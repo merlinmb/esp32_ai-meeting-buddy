@@ -43,7 +43,7 @@
   /* ---------- App shell: 3 columns ---------- */
   .app-shell {
     display: grid;
-    grid-template-columns: 15% 30% 1fr;
+    grid-template-columns: 15% 40% 1fr;
     height: 100vh;
   }
 
@@ -115,6 +115,18 @@
   }
   .page-header .sub { color: var(--text-dim); font-size: 0.82rem; line-height: 1.4; }
 
+  /* ---------- Record box ---------- */
+  .record-box { display: flex; flex-direction: column; gap: 8px; }
+  .record-btn { width: 100%; padding: 12px 14px; font-size: 0.86rem; text-align: center; }
+  .record-btn i { margin-right: 6px; }
+  .record-btn.recording {
+    background: linear-gradient(135deg, var(--err), #c23e51);
+  }
+  .record-btn.recording i { animation: recordPulse 1.4s ease-in-out infinite; }
+  @keyframes recordPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .record-hint { font-size: 0.72rem; color: var(--text-faint); line-height: 1.4; }
+  .record-hint.err { color: var(--err); }
+
   /* ---------- Hero metric cards ---------- */
   .hero-grid {
     display: flex;
@@ -129,7 +141,11 @@
     padding: 16px 16px 14px;
     overflow: hidden;
     text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s;
   }
+  .hero-card:hover { border-color: var(--accent); }
+  .hero-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .hero-card::after {
     content: "";
     position: absolute;
@@ -183,6 +199,8 @@
   .hero-card.progress .icon { background: rgba(255, 180, 84, 0.16); color: var(--warn); }
   .hero-card.failed { --glow-color: rgba(255, 92, 114, 0.30); }
   .hero-card.failed .icon { background: rgba(255, 92, 114, 0.16); color: var(--err); }
+  .hero-card.archived { --glow-color: rgba(154, 161, 181, 0.30); }
+  .hero-card.archived .icon { background: rgba(154, 161, 181, 0.16); color: var(--text-dim); }
 
   /* ---------- Table panel ---------- */
   .panel {
@@ -281,6 +299,8 @@
   }
   .table-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .table-icon-btn:disabled:hover { background: rgba(139, 123, 255, 0.14); }
+  .table-icon-btn.danger { color: var(--err); }
+  .table-icon-btn.danger:hover { background: rgba(255, 92, 114, 0.16); }
 
   .badge {
     display: inline-flex;
@@ -484,7 +504,7 @@
 
   /* Tablet: narrow the fixed columns a bit, transcript still gets the remainder */
   @media (max-width: 1200px) {
-    .app-shell { grid-template-columns: 200px 320px 1fr; }
+    .app-shell { grid-template-columns: 200px 420px 1fr; }
   }
 
   /* Mobile: stack into a single column, switch to a tab-based view.
@@ -561,26 +581,36 @@
       <div class="sub">Recordings received from the field unit, transcribed and cleaned up by Claude.</div>
     </div>
 
+    <div class="record-box">
+      <button class="btn primary record-btn" id="recordBtn"><i class="fa-solid fa-circle"></i> <span id="recordBtnLabel">Record meeting</span></button>
+      <div class="record-hint" id="recordHint">Records from your microphone.</div>
+    </div>
+
     <div class="hero-grid">
-      <div class="hero-card total">
+      <div class="hero-card total" data-filter="all" onclick="setFilter('all')">
         <div class="label"><span class="icon"><i class="fa-solid fa-inbox"></i></span> Total received</div>
         <div class="value" id="statTotal">–</div>
         <div class="footnote" id="statLast">–</div>
       </div>
-      <div class="hero-card completed">
+      <div class="hero-card completed" data-filter="completed" onclick="setFilter('completed')">
         <div class="label"><span class="icon"><i class="fa-solid fa-circle-check"></i></span> Completed</div>
         <div class="value" id="statCompleted">–</div>
         <div class="footnote" id="statCompletedPct">–</div>
       </div>
-      <div class="hero-card progress">
+      <div class="hero-card progress" data-filter="progress" onclick="setFilter('progress')">
         <div class="label"><span class="icon"><i class="fa-solid fa-hourglass-half"></i></span> In progress</div>
         <div class="value" id="statProgress">–</div>
         <div class="footnote">Transcribing or summarizing</div>
       </div>
-      <div class="hero-card failed">
+      <div class="hero-card failed" data-filter="failed" onclick="setFilter('failed')">
         <div class="label"><span class="icon"><i class="fa-solid fa-triangle-exclamation"></i></span> Failed</div>
         <div class="value" id="statFailed">–</div>
         <div class="footnote" id="statBytes">–</div>
+      </div>
+      <div class="hero-card archived" data-filter="archived" onclick="setFilter('archived')">
+        <div class="label"><span class="icon"><i class="fa-solid fa-box-archive"></i></span> Archived</div>
+        <div class="value" id="statArchived">–</div>
+        <div class="footnote">Removed from the active list</div>
       </div>
     </div>
   </div>
@@ -601,6 +631,7 @@
               <th>Meeting</th>
               <th class="col-secondary">Recorded</th>
               <th class="col-secondary">Received</th>
+              <th>Uploaded</th>
               <th>Status</th>
               <th class="col-secondary">Updated</th>
               <th>Actions</th>
@@ -665,12 +696,29 @@ let allMeetings = [];
 let currentMeetingId = null;
 let saveTimer = null;
 let viewingRaw = false;
+let activeFilter = "all";
+
+function setFilter(filter) {
+  activeFilter = activeFilter === filter ? "all" : filter;
+  document.querySelectorAll(".hero-card").forEach(el => {
+    el.classList.toggle("selected", el.dataset.filter === activeFilter);
+  });
+  document.getElementById("searchInput").value = "";
+  fetchAll();
+}
 
 function fmtTime(iso) {
   if (!iso) return "-";
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtUploaded(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString(undefined, { dateStyle: "short" }) + " " + d.toLocaleTimeString(undefined, { timeStyle: "short" });
 }
 
 function fmtBytes(n) {
@@ -717,14 +765,25 @@ function timeAgo(iso) {
 
 async function fetchAll() {
   const query = document.getElementById("searchInput").value || "";
+  const archivedParam = activeFilter === "archived" ? "&archived=1" : "";
   const [meetingsRes, statsRes] = await Promise.all([
-    fetch("/api/meetings?q=" + encodeURIComponent(query)),
+    fetch("/api/meetings?q=" + encodeURIComponent(query) + archivedParam),
     fetch("/api/stats"),
   ]);
   allMeetings = await meetingsRes.json();
   const stats = await statsRes.json();
   renderStats(stats);
   renderTable();
+}
+
+function meetingMatchesFilter(m) {
+  switch (activeFilter) {
+    case "completed": return m.status === "completed";
+    case "progress": return m.status === "received" || m.status === "transcribing" || m.status === "summarizing";
+    case "failed": return m.status === "failed";
+    case "archived": return true; // already fetched as archived-only
+    default: return true;
+  }
 }
 
 function renderStats(stats) {
@@ -738,6 +797,7 @@ function renderStats(stats) {
   document.getElementById("statProgress").textContent = stats.in_progress;
   document.getElementById("statFailed").textContent = stats.failed;
   document.getElementById("statBytes").textContent = fmtBytes(stats.total_bytes) + " received";
+  document.getElementById("statArchived").textContent = stats.archived;
 }
 
 function renderTable() {
@@ -747,9 +807,11 @@ function renderTable() {
   const count = document.getElementById("count");
   const hasQuery = (document.getElementById("searchInput").value || "").trim().length > 0;
 
-  count.textContent = allMeetings.length + (allMeetings.length === 1 ? " recording" : " recordings");
+  const filtered = allMeetings.filter(meetingMatchesFilter);
 
-  if (allMeetings.length === 0) {
+  count.textContent = filtered.length + (filtered.length === 1 ? " recording" : " recordings");
+
+  if (filtered.length === 0) {
     table.style.display = "none";
     empty.style.display = "block";
     empty.innerHTML = hasQuery
@@ -760,7 +822,7 @@ function renderTable() {
   table.style.display = "table";
   empty.style.display = "none";
 
-  rows.innerHTML = allMeetings.map(m => {
+  rows.innerHTML = filtered.map(m => {
     const status = m.status;
     const canRetry = !!m.raw_transcript;
     return `
@@ -771,6 +833,7 @@ function renderTable() {
         </td>
         <td class="time col-secondary">${fmtRecordedAt(m.meeting_name)}</td>
         <td class="time col-secondary">${fmtTime(m.received_at)}</td>
+        <td class="time">${fmtUploaded(m.received_at)}</td>
         <td>
           <span class="badge ${status}">${STATUS_LABEL[status] || status}</span>
           ${status === "failed" && m.error ? `<div class="error-note">${escapeHtml(m.error)}</div>` : ""}
@@ -779,7 +842,10 @@ function renderTable() {
         <td class="actions">
           <div class="actions-row">
             <button class="icon-btn table-icon-btn" ${canRetry ? "" : "disabled"} title="View raw transcript (Whisper output)" onclick="event.stopPropagation(); viewRawTranscript(${m.id}, '${escapeAttr(m.meeting_name)}')"><i class="fa-solid fa-microphone-lines"></i></button>
-            <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="event.stopPropagation(); retryMeeting(${m.id}, this)">Resubmit</button>
+            ${m.archived
+              ? `<button class="icon-btn table-icon-btn" title="Restore from archive" onclick="event.stopPropagation(); unarchiveMeeting(${m.id})"><i class="fa-solid fa-box-open"></i></button>`
+              : `<button class="icon-btn table-icon-btn danger" title="Archive this recording" onclick="event.stopPropagation(); archiveMeeting(${m.id})"><i class="fa-solid fa-trash"></i></button>
+            <button class="btn primary" ${canRetry ? "" : "disabled"} onclick="event.stopPropagation(); retryMeeting(${m.id}, this)">Resubmit</button>`}
           </div>
         </td>
       </tr>
@@ -813,6 +879,36 @@ async function retryMeeting(id, btn) {
     }
   } catch (e) {
     alert("Resubmit failed: " + e);
+  }
+  await fetchAll();
+}
+
+async function archiveMeeting(id) {
+  if (!confirm("Archive this recording? It will be hidden from the active list.")) return;
+  try {
+    const res = await fetch(`/api/meetings/${id}/archive`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Archive failed: " + (err.error || res.statusText));
+      return;
+    }
+    if (currentMeetingId === id) closeDetail();
+  } catch (e) {
+    alert("Archive failed: " + e);
+  }
+  await fetchAll();
+}
+
+async function unarchiveMeeting(id) {
+  try {
+    const res = await fetch(`/api/meetings/${id}/unarchive`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      alert("Restore failed: " + (err.error || res.statusText));
+      return;
+    }
+  } catch (e) {
+    alert("Restore failed: " + e);
   }
   await fetchAll();
 }
@@ -974,6 +1070,93 @@ document.getElementById("emailBtn").onclick = async () => {
 
 document.getElementById("detailClose").onclick = closeDetail;
 document.getElementById("searchInput").oninput = renderTable;
+
+/* ---------- Recording ---------- */
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordStream = null;
+let recordStartTime = null;
+let recordTimerInterval = null;
+
+const recordBtn = document.getElementById("recordBtn");
+const recordBtnLabel = document.getElementById("recordBtnLabel");
+const recordHint = document.getElementById("recordHint");
+
+function fmtElapsed(ms) {
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function startRecording() {
+  recordHint.classList.remove("err");
+  try {
+    recordStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    recordHint.textContent = "Microphone access was denied.";
+    recordHint.classList.add("err");
+    return;
+  }
+
+  recordedChunks = [];
+  mediaRecorder = new MediaRecorder(recordStream, { mimeType: "audio/webm" });
+  mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = uploadRecording;
+  mediaRecorder.start();
+
+  recordStartTime = Date.now();
+  recordBtn.classList.add("recording");
+  recordTimerInterval = setInterval(() => {
+    recordBtnLabel.textContent = "Stop recording (" + fmtElapsed(Date.now() - recordStartTime) + ")";
+  }, 1000);
+  recordBtnLabel.textContent = "Stop recording (0:00)";
+  recordHint.textContent = "Recording from microphone...";
+}
+
+function stopRecording() {
+  if (!mediaRecorder) return;
+  mediaRecorder.stop();
+  clearInterval(recordTimerInterval);
+  recordStream.getTracks().forEach(t => t.stop());
+  recordBtn.classList.remove("recording");
+  recordBtnLabel.textContent = "Record meeting";
+}
+
+async function uploadRecording() {
+  recordHint.textContent = "Uploading recording...";
+  const blob = new Blob(recordedChunks, { type: "audio/webm" });
+  const stamp = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const name = `MEETING_${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.webm`;
+
+  const formData = new FormData();
+  formData.append("audio", blob, name);
+
+  try {
+    const res = await fetch("/upload", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!res.ok) {
+      recordHint.textContent = "Upload failed: " + (data.error || res.statusText);
+      recordHint.classList.add("err");
+      return;
+    }
+    recordHint.textContent = "Uploaded — transcribing now, check the list below.";
+  } catch (e) {
+    recordHint.textContent = "Upload failed: " + e;
+    recordHint.classList.add("err");
+  }
+  mediaRecorder = null;
+  await fetchAll();
+}
+
+recordBtn.onclick = () => {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+};
 
 fetchAll();
 setInterval(fetchAll, 5000);

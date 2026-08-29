@@ -145,7 +145,7 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
     store.update_status(meeting_id, STATUS_SUMMARIZING)
     cleaned_markdown = clean_up_with_claude(raw_transcript, meeting_name)
 
-    out_path = OUTPUT_DIR / f"{meeting_name}.md"
+    out_path = OUTPUT_DIR / f"{meeting_name}_{meeting_id}.md"
     out_path.write_text(f"# {meeting_name}\n\n{cleaned_markdown}\n", encoding="utf-8")
     print(f"Wrote transcript: {out_path}")
 
@@ -161,7 +161,8 @@ def upload():
     audio_file = request.files["audio"]
     meeting_name = Path(audio_file.filename).stem or f"meeting_{datetime.now():%Y%m%d_%H%M%S}"
 
-    wav_path = RAW_AUDIO_DIR / f"{meeting_name}.wav"
+    upload_tag = f"{datetime.now():%Y%m%d_%H%M%S_%f}"
+    wav_path = RAW_AUDIO_DIR / f"{meeting_name}_{upload_tag}.wav"
     audio_file.save(wav_path)
     wav_bytes = wav_path.stat().st_size
     print(f"Received {wav_path} ({wav_bytes} bytes)")
@@ -207,7 +208,10 @@ def meeting_matches_query(meeting: dict, query: str) -> bool:
 
 @app.route("/api/meetings", methods=["GET"])
 def list_meetings():
-    meetings = store.list_all()
+    show_archived = request.args.get("archived", "").strip() == "1"
+    meetings = store.list_all(include_archived=show_archived)
+    if show_archived:
+        meetings = [m for m in meetings if m["archived"]]
     query = request.args.get("q", "").strip().lower()
     if query:
         meetings = [m for m in meetings if meeting_matches_query(m, query)]
@@ -219,6 +223,24 @@ def list_meetings():
 @app.route("/api/stats", methods=["GET"])
 def stats():
     return jsonify(store.stats())
+
+
+@app.route("/api/meetings/<int:meeting_id>/archive", methods=["POST"])
+def archive_meeting(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting:
+        abort(404)
+    store.set_archived(meeting_id, True)
+    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/api/meetings/<int:meeting_id>/unarchive", methods=["POST"])
+def unarchive_meeting(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting:
+        abort(404)
+    store.set_archived(meeting_id, False)
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/api/meetings/<int:meeting_id>/retry", methods=["POST"])
