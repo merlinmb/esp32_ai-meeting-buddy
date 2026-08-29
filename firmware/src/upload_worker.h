@@ -8,7 +8,6 @@
 #include "config.h"
 #include "wav_recorder.h"
 #include "wifi_uploader.h"
-#include "spi_bus_mutex.h"
 
 // Runs the upload queue on its own FreeRTOS task instead of inline in
 // loop(), so streaming a 2+ hour recording to WiFi never delays button
@@ -90,7 +89,7 @@ class UploadWorker {
   }
 
   void runPass() {
-    std::vector<String> pending = WavRecorder::pendingFiles();  // SPI-guarded internally
+    std::vector<String> pending = WavRecorder::pendingFiles();
     if (pending.empty()) return;
     if (_recordingActive.load()) return;  // recording started while we were scanning - stay parked
 
@@ -118,7 +117,7 @@ class UploadWorker {
       WifiUploader::UploadResult result = _uploader.uploadFile(path, shouldAbort);
       if (result == WifiUploader::UploadResult::ABORTED) { interrupted = true; break; }
       if (result == WifiUploader::UploadResult::SUCCESS) {
-        WavRecorder::markUploaded(path);  // SPI-guarded internally
+        WavRecorder::markUploaded(path);
       } else {
         failed++;
       }

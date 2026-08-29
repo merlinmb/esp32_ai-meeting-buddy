@@ -1,15 +1,17 @@
 // AI Meeting Buddy - firmware for the Waveshare ESP32-C6-LCD-1.69
 //
-// Flow: idle screen -> press button -> record to SD as WAV, with a live
-// waveform on the LCD -> press again -> stop, finalize file -> hold the
-// button from idle to open a menu (upload now / wifi info / storage /
-// about) navigated with short press (next item) and long press (select).
+// Flow: idle screen -> BOOT button -> record to SD as WAV, with a live
+// waveform on the LCD -> BOOT again -> stop, finalize file -> PWR button
+// from idle opens a menu (upload now / wifi info / storage / about),
+// navigated with BOOT (next item) and PWR (select) - the board's two
+// general-purpose buttons each get their own dedicated job instead of
+// overloading one with short/long-press timing (see pins.h and
+// record_button.h).
 //
 // Before this compiles/works on real hardware:
-//   1. Fill in the TODOs in pins.h with your board's real GPIO numbers.
-//   2. Fill in config.h with your WiFi credentials (server URL already
+//   1. Fill in config.h with your WiFi credentials (server URL already
 //      points at the savage.local Docker deployment - see server/deploy.sh).
-//   3. If audio is silent/garbled once everything else works, see the note
+//   2. If audio is silent/garbled once everything else works, see the note
 //      at the top of es8311_codec.h about MCLK/PLL settings.
 //
 // I2S note: this uses arduino-esp32's ESP_I2S.h wrapper (I2SClass), which is
@@ -34,14 +36,8 @@
 #include "wav_recorder.h"
 #include "ui_display.h"
 #include "record_button.h"
-#include "spi_bus_mutex.h"
 #include "upload_worker.h"
 #include "audio_visualizer.h"
-
-// The LCD and SD card share a SPI bus (see pins.h and spi_bus_mutex.h); this
-// is the one definition of the mutex declared extern there.
-SemaphoreHandle_t g_spiBusMutex = nullptr;
-void spiBusMutexBegin() { g_spiBusMutex = xSemaphoreCreateMutex(); }
 
 enum class State { IDLE, RECORDING, MENU, INFO };
 
@@ -52,7 +48,8 @@ static ES8311 codec;
 static Pcf85063 rtc;
 static WavRecorder recorder;
 static UiDisplay ui;
-static RecordButton button;
+static DebouncedButton recordButton;
+static DebouncedButton menuButton;
 static UploadWorker uploadWorker;
 static AudioVisualizer visualizer;
 
@@ -192,9 +189,9 @@ void runSelectedMenuItem() {
     return;
   }
 
-  // Info screens: show, then wait for a long-press ("hold: back") to return
-  // to the menu. Handled as a lightweight sub-loop so main.cpp's top-level
-  // loop() doesn't need a state per info screen.
+  // Info screens: show, then wait for either button to return to the menu.
+  // Handled as a lightweight sub-loop so main.cpp's top-level loop() doesn't
+  // need a state per info screen.
   state = State::INFO;
   if (label == "WiFi info") showWifiInfoScreen();
   else if (label == "Storage") showStorageInfoScreen();
@@ -202,12 +199,7 @@ void runSelectedMenuItem() {
 }
 
 void setup() {
-  Serial.begin(115200);
-
-  // Must exist before anything below touches the LCD or SD card, and
-  // definitely before the upload worker task (started at the end of this
-  // function) can start doing SD reads concurrently with loop().
-  spiBusMutexBegin();
+  Serial.begin(115200);  // no-op with CDC disabled (see platformio.ini) - USB D+/D- now drive the SD card
 
   Wire.begin(PIN_CODEC_I2C_SDA, PIN_CODEC_I2C_SCL);  // shared bus - codec + RTC
   rtc.begin();
@@ -229,7 +221,8 @@ void setup() {
     Serial.println("LCD init failed - check wiring/pins.h");
   }
 
-  button.begin();
+  recordButton.begin(PIN_RECORD_BUTTON, RECORD_BUTTON_ACTIVE_LOW);
+  menuButton.begin(PIN_MENU_BUTTON, MENU_BUTTON_ACTIVE_LOW);
   uploadWorker.begin();
 
   ui.showMessage("AI Meeting Buddy\nstarting up...");
@@ -237,7 +230,8 @@ void setup() {
 }
 
 void loop() {
-  ButtonEvent ev = button.poll();
+  bool recordPressed = recordButton.pressed();
+  bool menuPressed = menuButton.pressed();
 
   switch (state) {
     case State::IDLE: {
@@ -245,13 +239,14 @@ void loop() {
       // screen happens to be showing (clock, upload progress, or a failure
       // message). startRecording() tells the upload worker to stand down;
       // it doesn't need to have finished standing down before we proceed
-      // here, since it never touches the LCD and any SD access it's still
-      // mid-chunk on serializes safely through the bus mutex.
-      if (ev == ButtonEvent::SHORT) {
+      // here, since the SD card's SPI peripheral is entirely separate from
+      // the LCD's (see wav_recorder.h/ui_display.h), so nothing here can
+      // block on the display.
+      if (recordPressed) {
         startRecording();
         break;
       }
-      if (ev == ButtonEvent::LONG) {
+      if (menuPressed) {
         enterMenu();
         break;
       }
@@ -289,7 +284,7 @@ void loop() {
 
     case State::RECORDING: {
       pumpAudioToSd();
-      if (ev == ButtonEvent::SHORT || ev == ButtonEvent::LONG) {
+      if (recordPressed) {
         stopRecording();
         break;
       }
@@ -302,11 +297,11 @@ void loop() {
     }
 
     case State::MENU: {
-      if (ev == ButtonEvent::SHORT) {
+      if (recordPressed) {
         menuSelectedIndex = (menuSelectedIndex + 1) % kMenuItems.size();
         menuLastActivityMs = millis();
         ui.showMenu(kMenuItems, menuSelectedIndex);
-      } else if (ev == ButtonEvent::LONG) {
+      } else if (menuPressed) {
         menuLastActivityMs = millis();
         runSelectedMenuItem();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
@@ -316,10 +311,9 @@ void loop() {
     }
 
     case State::INFO: {
-      // A long-press from an info screen goes back to the menu; anything
-      // else (or a timeout) also bails out to keep the UI from ever feeling
-      // stuck on one screen.
-      if (ev == ButtonEvent::LONG || ev == ButtonEvent::SHORT) {
+      // Either button from an info screen goes back to the menu; a timeout
+      // also bails out to keep the UI from ever feeling stuck on one screen.
+      if (recordPressed || menuPressed) {
         enterMenu();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         state = State::IDLE;

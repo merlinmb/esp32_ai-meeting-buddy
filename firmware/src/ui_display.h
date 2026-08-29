@@ -1,21 +1,23 @@
 #pragma once
 #include <Arduino.h>
+#include <SPI.h>
 #include <Arduino_GFX_Library.h>
 #include <vector>
 #include "pins.h"
 #include "audio_visualizer.h"
-#include "spi_bus_mutex.h"
 
 // Status/menu UI for the 240x280 ST7789. Everything's drawn with primitive
 // shapes + text (no image assets), organized as a few full-screen "views" so
 // each state in main.cpp maps to exactly one draw call.
 //
-// Every public show*() method below takes SpiBusGuard for its whole draw:
-// the LCD and SD card share the same SPI bus pins (see pins.h), and
-// upload_worker.h's background task now reads SD concurrently with
-// whatever loop() is drawing, so a full screen redraw needs to complete as
-// one atomic bus transaction rather than interleave with an SD access -
-// see spi_bus_mutex.h.
+// Uses Arduino_HWSPI, not Arduino_ESP32SPI: the latter's fast direct-register
+// path doesn't support the ESP32-C6 at all (excluded outright in the GFX
+// library's own target list - confirmed against the exact library version
+// Waveshare's own C6 demo firmware ships, which uses Arduino_HWSPI for the
+// same reason). Arduino_HWSPI goes through the standard SPIClass API, so it
+// gets its own SPI peripheral (HSPI) explicitly bound below - separate from
+// the SD card's default SPIClass (FSPI, see wav_recorder.h) - so the LCD and
+// the upload worker's background SD reads never touch the same hardware.
 
 struct MenuItem {
   const char *label;
@@ -24,7 +26,7 @@ struct MenuItem {
 class UiDisplay {
  public:
   bool begin() {
-    _bus = new Arduino_ESP32SPI(PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCLK, PIN_LCD_MOSI, GFX_NOT_DEFINED /* MISO not used by LCD */);
+    _bus = new Arduino_HWSPI(PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCLK, PIN_LCD_MOSI, GFX_NOT_DEFINED /* MISO not used by LCD */, &_lcdSpi);
     _gfx = new Arduino_ST7789(_bus, PIN_LCD_RST, 0 /* rotation */, true /* IPS */, 240, 280);
     if (!_gfx->begin()) return false;
 
@@ -48,7 +50,6 @@ class UiDisplay {
 
   // ---- Idle: big clock, wifi status, SD space ring, last recording card --
   void showIdle(const String &clockStr, bool wifiConnected, bool sdOk, float sdFreePct, uint32_t lastRecordingSeconds) {
-    SpiBusGuard guard;
     _gfx->fillScreen(_bg);
 
     // Big vibrant clock, top-left aligned like the reference watch face.
@@ -97,12 +98,11 @@ class UiDisplay {
     _gfx->setCursor(cardX + 10, cardY + 34);
     _gfx->print(durBuf);
 
-    drawFooter("press: record", "hold: menu");
+    drawFooter("BOOT: record", "PWR: menu");
   }
 
   // ---- Recording: live waveform + elapsed time -------------------------
   void showRecording(uint32_t elapsedSeconds, const AudioVisualizer &viz) {
-    SpiBusGuard guard;
     beginFrame(nullptr);
 
     // Pulsing-looking rec dot + label (no real animation needed, just a
@@ -123,12 +123,11 @@ class UiDisplay {
 
     drawWaveform(viz, /*top=*/120, /*height=*/100);
 
-    drawFooter("press: stop", "");
+    drawFooter("BOOT: stop", "");
   }
 
   // ---- Upload progress ---------------------------------------------------
   void showUploading(int doneCount, int totalCount) {
-    SpiBusGuard guard;
     beginFrame("UPLOADING");
 
     _gfx->setTextColor(_text);
@@ -148,12 +147,11 @@ class UiDisplay {
     // Recording still wins instantly even with an upload in flight (see
     // upload_worker.h), so the footer matches the idle screen's, not a
     // pause/cancel prompt.
-    drawFooter("press: record", "hold: menu");
+    drawFooter("BOOT: record", "PWR: menu");
   }
 
   // ---- Upload failed: shown until the next retry (auto or from the menu) -
   void showUploadFailed(int failedCount, int totalCount) {
-    SpiBusGuard guard;
     beginFrame("UPLOAD FAILED");
 
     int sentCount = totalCount - failedCount;
@@ -169,12 +167,11 @@ class UiDisplay {
 
     // Same button behavior as idle - this is just an informational overlay,
     // not a separate screen with its own gestures.
-    drawFooter("press: record", "hold: menu");
+    drawFooter("BOOT: record", "PWR: menu");
   }
 
   // ---- Menu: scrollable single-column list, one item highlighted --------
   void showMenu(const std::vector<MenuItem> &items, int selectedIndex) {
-    SpiBusGuard guard;
     beginFrame("MENU");
 
     int y = 60;
@@ -191,11 +188,10 @@ class UiDisplay {
       y += 40;
     }
 
-    drawFooter("press: next", "hold: select");
+    drawFooter("BOOT: next", "PWR: select");
   }
 
   void showInfo(const String &title, const std::vector<String> &lines) {
-    SpiBusGuard guard;
     beginFrame(title.c_str());
     int y = 70;
     _gfx->setTextSize(2);
@@ -205,11 +201,10 @@ class UiDisplay {
       _gfx->print(line);
       y += 28;
     }
-    drawFooter("hold: back", "");
+    drawFooter("back", "");
   }
 
   void showMessage(const String &msg) {
-    SpiBusGuard guard;
     beginFrame(nullptr);
     _gfx->setTextColor(_text);
     _gfx->setTextSize(2);
@@ -218,6 +213,9 @@ class UiDisplay {
   }
 
  private:
+  // Dedicated SPI peripheral for the LCD - see the class comment above for
+  // why this needs to be its own SPIClass instance rather than the default.
+  SPIClass _lcdSpi{HSPI};
   Arduino_DataBus *_bus = nullptr;
   Arduino_GFX *_gfx = nullptr;
   uint16_t _bg, _panel, _accent, _danger, _text, _muted;

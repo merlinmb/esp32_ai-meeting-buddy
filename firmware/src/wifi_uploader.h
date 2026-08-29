@@ -4,7 +4,6 @@
 #include <SD.h>
 #include <functional>
 #include "config.h"
-#include "spi_bus_mutex.h"
 
 // Connects to WiFi on demand, then POSTs one pending WAV file to the
 // companion receiver script in small chunks (streamed from SD, not
@@ -63,14 +62,10 @@ class WifiUploader {
     int port;
     if (!parseUrl(host, port, reqPath)) return UploadResult::FAILED;
 
-    size_t fileSize;
-    {
-      SpiBusGuard guard;
-      File probe = SD.open(path, FILE_READ);
-      if (!probe) return UploadResult::FAILED;
-      fileSize = probe.size();
-      probe.close();
-    }
+    File probe = SD.open(path, FILE_READ);
+    if (!probe) return UploadResult::FAILED;
+    size_t fileSize = probe.size();
+    probe.close();
 
     String fileName = baseName(path);
 
@@ -78,11 +73,7 @@ class WifiUploader {
     if (resumeFrom < 0) resumeFrom = 0;  // couldn't ask - start from 0, a 409 will correct us if that's wrong
     if ((size_t)resumeFrom >= fileSize) return UploadResult::SUCCESS;  // server already has the whole file
 
-    File f;
-    {
-      SpiBusGuard guard;
-      f = SD.open(path, FILE_READ);
-    }
+    File f = SD.open(path, FILE_READ);
     if (!f) return UploadResult::FAILED;
 
     size_t offset = (size_t)resumeFrom;
@@ -124,7 +115,7 @@ class WifiUploader {
       delay(UPLOAD_RETRY_BACKOFF_MS);
     }
 
-    { SpiBusGuard guard; f.close(); }
+    f.close();
     return result;
   }
 
@@ -234,7 +225,7 @@ class WifiUploader {
     client.println("Connection: close");
     client.println();
 
-    { SpiBusGuard guard; f.seek(offset); }
+    f.seek(offset);
 
     // Stall watchdog: the clock resets on every buffer actually written, so
     // it only fires if the link genuinely stops accepting data mid-chunk -
@@ -251,8 +242,7 @@ class WifiUploader {
         break;
       }
       size_t want = min((size_t)sizeof(buf), len - sentBytes);
-      size_t n;
-      { SpiBusGuard guard; n = f.read(buf, want); }
+      size_t n = f.read(buf, want);
       if (n == 0) { streamOk = false; break; }  // unexpected SD read failure
       size_t written = client.write(buf, n);
       if (written != n) { streamOk = false; break; }

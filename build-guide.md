@@ -25,24 +25,20 @@ The ESP32-C6-LCD-1.69 already includes most of what this project needs onboard, 
 
 The board has no SD slot, so you need a small SPI microSD breakout board (the common ones use pins VCC, GND, MISO, MOSI, SCK, CS - roughly $2, e.g. an "Micro SD Card Adapter Module" breakout).
 
-Wire it to the exposed GPIO/SPI pads on the ESP32-C6-LCD-1.69's header:
+The pin numbers below are confirmed against the official schematic (`ESP32-C6-LCD-1.69-Schematic.pdf`, from the product wiki page) and cross-checked against a working sibling project on the same board - no more guessing. This board's external header only exposes 8 signal pins total, and every one of them already does *something* onboard (the LCD, the shared RTC/codec/IMU I2C bus, the two buttons, or native USB serial), so there's no way to wire a 4-wire SPI SD card without sacrificing one of those. This project sacrifices the native USB-CDC serial console (see `firmware/platformio.ini`) rather than the audio codec or a button, since losing `Serial.print()` output is an inconvenience, not a broken core feature:
 
-| SD module pin | Connect to | Notes |
-|---|---|---|
-| VCC | 3V3 | Do not use 5V - board logic is 3.3V |
-| GND | GND | |
-| SCK | Shared SPI clock pin (same net as the LCD's SCLK) | SD cards support SPI mode, so you can share the bus with the LCD |
-| MOSI | Shared SPI MOSI pin (same net as the LCD's MOSI) | |
-| MISO | A free exposed GPIO | The LCD doesn't use MISO (write-only), so this pin needs to be newly wired |
-| CS | A separate free exposed GPIO (do NOT share with LCD's CS) | Each SPI device needs its own chip-select |
+| SD module pin | ESP32-C6 GPIO | Header label | Notes |
+|---|---|---|---|
+| VCC | 3V3 | 3V3 | Do not use 5V - board logic is 3.3V |
+| GND | GND | GND | |
+| SCK | GPIO16 | ESP_TXD | Genuinely free - unused by this firmware |
+| CS | GPIO17 | ESP_RXD | Genuinely free - unused by this firmware |
+| MOSI | GPIO12 | USB_N | Native USB D- pad - repurposed since CDC serial is disabled |
+| MISO | GPIO13 | USB_P | Native USB D+ pad - repurposed since CDC serial is disabled |
 
-**Important - exact GPIO numbers:** Waveshare's public docs pages don't publish a full GPIO pinout table, and I don't want to hand you numbers I can't verify against your actual board revision. Before wiring:
+None of these overlap with the LCD (GPIO1-6, not exposed on the header at all) or the shared RTC/codec/IMU I2C bus (SCL=GPIO7/SDA=GPIO8) - repurposing SCL/SDA for the SD card would have broken the audio codec, which is this device's whole job, so that was ruled out first.
 
-1. Open the schematic PDF and pinout diagram linked from the [product wiki page](https://www.waveshare.com/wiki/ESP32-C6-LCD-1.69).
-2. Pull the exact pin macros from Waveshare's own demo firmware: [github.com/waveshareteam/ESP32-C6-LCD-1.9](https://github.com/waveshareteam/ESP32-C6-LCD-1.9) (`01_Arduino_Libraries` / `02_Example`) - look for a `pin_config.h` or similar header. That file tells you which GPIOs are already committed to the LCD, codec, IMU, and RTC, and which pads on the header are actually free.
-3. Drop the confirmed numbers into `firmware/src/pins.h` (marked with `TODO` in the firmware package) before building.
-
-This matters because getting it wrong risks contending with a pin the codec or LCD already uses.
+**If you want to double-check any of this yourself:** `docs.waveshare.com`/`www.waveshare.com`/`files.waveshare.com` may be unreachable from some sandboxed dev environments (an egress-proxy policy issue, not a real network problem) - if so, download the schematic PDF yourself and open it locally, or read it with any AI assistant that can process PDF/image attachments directly. [github.com/aedile/PELLETINO](https://github.com/aedile/PELLETINO)'s `docs/HARDWARE.md` is also a solid independent cross-check - a different project on the exact same board.
 
 ## 3. System architecture
 
@@ -82,28 +78,27 @@ The companion script (`server/receive_and_transcribe.py`, delivered separately) 
 
 ## 5. Firmware behavior (ESP32-C6 side)
 
-The board only has one button safe to use in application code - the side button. (PWR is a hardware power switch, not a GPIO; BOOT and RST are reserved for flashing/reset and risky to repurpose.) The UI is built around two gestures on that one button: a short press and a long press (hold ~0.6s).
+The board has two general-purpose buttons usable in application code: BOOT (GPIO9) and PWR (GPIO18) - both just a passive pull-up + switch to GND, confirmed safe to repurpose via the schematic and the PELLETINO cross-check in section 2. (RST is the third physical button, but it's wired to the chip's hardware reset line, not a GPIO, so it can't be repurposed.) BOOT is the record button; PWR is the menu button - no short/long-press timing needed, since each gesture gets its own dedicated button.
 
-- **Idle screen:** clock (from the RTC), battery pill, WiFi status dot, and a note when recordings are queued for upload. Short press = start recording. Long press = open the menu.
-- **Recording screen:** a live scrolling waveform (real RMS levels computed from the actual audio being captured, not a fake animation), elapsed time, and a red REC indicator. Short or long press = stop and finalize the file (`MEETING_YYYYMMDD_HHMMSS.wav`, timestamped from the RTC; the WAV header is rewritten with the real file size once recording stops, since that's unknown up front).
-- **Menu:** short press cycles through Upload now / WiFi info / Storage / About / Exit; long press selects the highlighted item. Auto-returns to idle after 8 seconds of no input, so it can't get stuck open. Storage shows SD used/total space and how many recordings are still waiting to upload; WiFi info shows the configured network and current connection state.
-- **Upload:** from the menu, or automatically whenever the device is idle and it's been a while since the last attempt. Connects WiFi, POSTs any un-uploaded WAV files to the receiver, marks each with a `.done` marker on success, then disconnects WiFi to save power.
-- **Power:** WiFi radio is only brought up for uploads, never during recording - the single biggest thing you can do for both battery life and recording reliability on a single-core chip.
+- **Idle screen:** clock (from the RTC), WiFi status dot, SD free-space ring, and last-recording card. BOOT = start recording. PWR = open the menu.
+- **Recording screen:** a live scrolling waveform (real RMS levels computed from the actual audio being captured, not a fake animation), elapsed time, and a red REC indicator. BOOT = stop and finalize the file (`MEETING_YYYYMMDD_HHMMSS.wav`, timestamped from the RTC; the WAV header is rewritten with the real file size once recording stops, since that's unknown up front).
+- **Menu:** BOOT cycles through Upload now / WiFi info / Storage / About / Exit; PWR selects the highlighted item. Auto-returns to idle after 8 seconds of no input, so it can't get stuck open. Storage shows SD used/total space and how many recordings are still waiting to upload; WiFi info shows the configured network and current connection state.
+- **Upload:** runs on its own background task (not inline in the main loop), so it never delays button response or LCD redraws even mid-upload. Attempted automatically about every 5 minutes whenever nothing is recording, or immediately via the menu's "Upload now". Pressing BOOT to start recording interrupts an in-flight upload within about one network chunk - recording always wins.
+- **Power:** WiFi radio is only brought up for uploads, never during recording - the single biggest thing you can do for both battery life and recording reliability.
 
 ## 6. What's delivered alongside this doc
 
-- `firmware/` - a PlatformIO project (VS Code + PlatformIO extension): I2S capture, SD/WAV handling, the button gesture + menu state machine, the LCD UI (idle/recording+waveform/menu/info/upload screens), and WiFi upload. `src/pins.h` has placeholders marked `TODO` for the fixed onboard pins you need to pull from Waveshare's schematic/demo repo, plus the SD card pins you're free to choose per section 2.
+- `firmware/` - a PlatformIO project (VS Code + PlatformIO extension): I2S capture, SD/WAV handling, the two-button + menu state machine, the LCD UI (idle/recording+waveform/menu/info/upload screens), and a background-task WiFi uploader. `src/pins.h` has the confirmed real GPIO numbers for everything, including the SD card wiring from section 2 - nothing left to fill in.
 - `server/receive_and_transcribe.py` - the companion receiver: a Flask server that accepts the WAV upload, transcribes it, sends it to Claude for cleanup/summary, and writes/emails the result.
 - `server/Dockerfile`, `docker-compose.yml`, `deploy.sh` - deploys the receiver as a container on **savage.local** (see section 7a) so it's always on and your laptop doesn't need to be.
 
 ## 7. Suggested build order
 
-1. Confirm pin numbers from Waveshare's schematic/demo repo, fill in `pins.h`.
-2. Wire the SD card breakout per section 2, verify it mounts (a basic SD list-files sketch is the fastest sanity check).
-3. Flash the firmware, confirm a short press produces a playable WAV file on the SD card, and that the waveform moves while you talk into the mic.
-4. Confirm the menu opens on long-press and Storage/WiFi/About screens render correctly.
-5. Deploy the receiver to savage.local (section 7a) or run it locally for a quicker first test, confirm an uploaded WAV shows up and gets transcribed.
-6. Case/enclosure, battery capacity, and mounting are up to you at this point - everything electrical is done.
+1. Wire the SD card breakout per section 2, verify it mounts (a basic SD list-files sketch is the fastest sanity check).
+2. Flash the firmware (note: with the native USB-CDC console disabled per section 2, you won't see `Serial.print()` output over USB - flashing itself still works via the BOOT+RESET button combo). Confirm BOOT produces a playable WAV file on the SD card, and that the waveform moves while you talk into the mic.
+3. Confirm the menu opens on PWR and Storage/WiFi/About screens render correctly.
+4. Deploy the receiver to savage.local (section 7a) or run it locally for a quicker first test, confirm an uploaded WAV shows up and gets transcribed.
+5. Case/enclosure, battery capacity, and mounting are up to you at this point - everything electrical is done.
 
 ## 7a. Deploying the receiver to savage.local
 
@@ -126,5 +121,5 @@ If the device can't resolve `savage.local` over mDNS on your network, swap in it
 
 - **ASR choice:** local Whisper (free, private, runs on savage.local) vs. a hosted transcription API (costs money per meeting, less setup, no local compute needed). The delivered script defaults to local `faster-whisper`.
 - **Output destination:** save transcripts to the Docker volume (pull them with `deploy.sh pull-transcripts`), email them, or both - the script supports either.
-- **Multi-file batching:** if you record several meetings before you're near WiFi, the firmware uploads all pending files in one pass - no changes needed for that case.
-- **A second physical button:** the menu currently runs on one button using short/long-press gestures, which works but means everything is sequential (cycle, cycle, cycle, select). Wiring one extra button to a free GPIO later would let you split that into dedicated "next" and "select" buttons if the single-button menu ever feels slow.
+- **Multi-file batching:** if you record several meetings before you're near WiFi, the upload worker sends all pending files in one pass - no changes needed for that case.
+- **No USB serial console:** since the native USB D+/D- pads now drive the SD card's MOSI/MISO, there's no live `Serial.print()` debug output during normal operation. If you need it back later, that means giving up either the SD card wiring in section 2 or (worse) the onboard I2C bus that the audio codec/RTC depend on - there's no free pin left to add a console back without a tradeoff somewhere.
