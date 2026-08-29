@@ -135,6 +135,24 @@ class UiDisplay {
     }
   }
 
+  // ---- Upload failed: lets the user retry or dismiss ---------------------
+  void showUploadFailed(int failedCount, int totalCount) {
+    beginFrame("UPLOAD FAILED");
+
+    int sentCount = totalCount - failedCount;
+    _gfx->setTextColor(_danger);
+    _gfx->setTextSize(3);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%d / %d sent", sentCount, totalCount);
+    centerText(buf, 90);
+
+    _gfx->setTextColor(_muted);
+    _gfx->setTextSize(2);
+    centerText("Check WiFi/server", 140);
+
+    drawFooter("press: retry", "hold: back");
+  }
+
   // ---- Menu: scrollable single-column list, one item highlighted --------
   void showMenu(const std::vector<MenuItem> &items, int selectedIndex) {
     beginFrame("MENU");

@@ -26,6 +26,27 @@
 #define AUTO_UPLOAD_WHEN_IDLE  true   // if true, device tries to flush pending recordings to WiFi whenever it's idle and not recording
 #define UPLOAD_RETRY_INTERVAL_MS  (5UL * 60UL * 1000UL)  // don't hammer WiFi if the server is unreachable
 
+// Every blocking network wait a single upload attempt does is capped by one
+// of these, so a stalled/slow link fails fast instead of hanging loop() long
+// enough to trip the watchdog:
+//   - UPLOAD_SOCKET_TIMEOUT_MS   bounds the TCP connect and the final wait
+//                                for the server's HTTP response.
+//   - UPLOAD_STALL_TIMEOUT_MS    bounds time with NO forward progress while
+//                                streaming the file body - it resets after
+//                                every chunk written, so large recordings
+//                                are fine as long as bytes keep moving.
+// Within a single upload pass, each file gets UPLOAD_MAX_RETRIES attempts
+// (with a short backoff between them) before it's left pending for the next
+// pass or a manual retry from the display.
+#define UPLOAD_SOCKET_TIMEOUT_MS  15000
+#define UPLOAD_STALL_TIMEOUT_MS   15000
+#define UPLOAD_MAX_RETRIES        3
+#define UPLOAD_RETRY_BACKOFF_MS   2000
+
+// How long the "upload failed - press: retry" screen sits before giving up
+// and returning to idle on its own (a manual short-press retries sooner).
+#define UPLOAD_FAILED_SCREEN_TIMEOUT_MS  (15UL * 1000UL)
+
 // ---- Menu ---------------------------------------------------------------
 #define MENU_IDLE_TIMEOUT_MS  (8UL * 1000UL)   // auto-return to idle if the menu sits untouched this long
 #define DEVICE_VERSION  "0.2"

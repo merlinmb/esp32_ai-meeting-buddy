@@ -37,7 +37,7 @@
 #include "wifi_uploader.h"
 #include "audio_visualizer.h"
 
-enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO };
+enum class State { IDLE, RECORDING, UPLOADING, UPLOAD_FAILED, MENU, INFO };
 
 static State state = State::IDLE;
 
@@ -55,6 +55,7 @@ static unsigned long recordingStartMs = 0;
 static unsigned long lastIdleRedrawMs = 0;
 static unsigned long lastUploadAttemptMs = 0;
 static uint32_t lastRecordingSeconds = 0;
+static unsigned long uploadFailedActivityMs = 0;
 
 static const std::vector<MenuItem> kMenuItems = {
   {"Upload now"},
@@ -117,27 +118,40 @@ void pumpAudioToSd() {
   }
 }
 
+// Puts up the "upload failed" screen and switches to it; short-press from
+// there retries immediately, long-press (or a timeout) dismisses to idle.
+void showUploadFailedScreen(int failedCount, int totalCount) {
+  uploadFailedActivityMs = millis();
+  state = State::UPLOAD_FAILED;
+  ui.showUploadFailed(failedCount, totalCount);
+}
+
 void tryUpload() {
   if (!sdOk) return;
   auto pending = WavRecorder::pendingFiles();
   if (pending.empty()) return;
 
+  int total = (int)pending.size();
   state = State::UPLOADING;
-  ui.showUploading(0, (int)pending.size());
+  ui.showUploading(0, total);
 
   if (!uploader.connect()) {
-    ui.showMessage("WiFi unavailable");
-    delay(1500);
-    state = State::IDLE;
+    uploader.disconnect();
+    showUploadFailedScreen(total, total);
     return;
   }
 
-  uploader.uploadAllPending(pending, [](int done, int total) {
+  int failed = uploader.uploadAllPending(pending, [](int done, int total) {
     ui.showUploading(done, total);
   });
 
   uploader.disconnect();
-  state = State::IDLE;
+
+  if (failed > 0) {
+    showUploadFailedScreen(failed, total);
+  } else {
+    state = State::IDLE;
+  }
 }
 
 void enterMenu() {
@@ -189,7 +203,7 @@ void runSelectedMenuItem() {
   String label = kMenuItems[menuSelectedIndex].label;
 
   if (label == "Upload now") {
-    tryUpload();  // sets state internally (UPLOADING -> IDLE)
+    tryUpload();  // sets state internally (UPLOADING -> IDLE or UPLOAD_FAILED)
     return;
   }
   if (label == "Exit") {
@@ -287,6 +301,17 @@ void loop() {
     case State::UPLOADING:
       // handled synchronously inside tryUpload(); nothing to do here
       break;
+
+    case State::UPLOAD_FAILED: {
+      if (ev == ButtonEvent::SHORT) {
+        tryUpload();  // retry now; sets state internally again
+      } else if (ev == ButtonEvent::LONG) {
+        state = State::IDLE;
+      } else if (millis() - uploadFailedActivityMs > UPLOAD_FAILED_SCREEN_TIMEOUT_MS) {
+        state = State::IDLE;  // walked away - don't get stuck on this screen
+      }
+      break;
+    }
 
     case State::MENU: {
       if (ev == ButtonEvent::SHORT) {
