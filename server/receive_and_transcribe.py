@@ -124,7 +124,7 @@ def api_json_error(e):
     # token '<'" / "did not match the expected pattern" - most commonly on
     # session expiry (401). Return JSON for the fetch-based routes so the
     # frontend can show a clear message instead.
-    if request.path.startswith("/api/") or request.path == "/upload":
+    if request.path.startswith("/api/") or request.path in ("/upload", "/upload/status", "/upload/chunk"):
         return jsonify({"error": e.description or e.name}), e.code
     return e
 
@@ -444,6 +444,108 @@ def upload():
     _enqueue("transcribe", (meeting_id, wav_path, meeting_name))
 
     return jsonify({"status": "ok", "meeting_id": meeting_id}), 200
+
+
+# ---------------------------------------------------------------------------
+# Chunked/resumable upload for the ESP32 device only (the browser recorder
+# above sends one small blob and doesn't need this). Meeting recordings can
+# run 2+ hours (100+ MB), so a single all-or-nothing POST that has to restart
+# from byte 0 on any WiFi hiccup may never complete. Here the server is the
+# only source of truth for how many bytes of a given file it already has -
+# the device never assumes; it always asks (or reads the previous chunk's
+# response) and resumes from that offset, so this also survives the device
+# losing power mid-upload, not just a dropped connection.
+#
+# Responses are plain text, not JSON: the ESP32 client has no JSON parser,
+# and the only thing it ever needs from a response is a leading integer
+# (bytes received so far) plus an optional trailing "COMPLETE" marker.
+# ---------------------------------------------------------------------------
+
+CHUNK_READ_BUFFER = 65536  # bytes read from the request stream per iteration while appending a chunk to disk
+
+
+def sanitize_upload_filename(raw_name: str) -> str:
+    """Like sanitize_meeting_name, but keeps the .wav extension so the
+    on-disk chunked-upload filename matches the device's own filename - its
+    RTC-timestamped names are already unique, so no extra suffix is needed
+    the way the whole-file /upload endpoint above adds one."""
+    safe_stem = sanitize_meeting_name(Path(raw_name or "").stem)
+    return f"{safe_stem}.wav"
+
+
+@app.route("/upload/status", methods=["GET"])
+@upload_token_required
+def upload_status():
+    """How many bytes of this filename's chunked upload the server already
+    has - 0 if none. The device calls this before (re)starting a file so a
+    resumed upload (after a dropped connection, a reboot, or just the next
+    periodic retry) knows where to seek to instead of resending from byte 0."""
+    name = request.args.get("name", "")
+    if not name:
+        return "missing 'name'", 400
+    safe_name = sanitize_upload_filename(name)
+    final_path = RAW_AUDIO_DIR / safe_name
+    part_path = RAW_AUDIO_DIR / f"{safe_name}.part"
+    if final_path.exists():
+        # Already fully received (and finalized) by an earlier attempt whose
+        # last ack the device never saw - report it done rather than making
+        # the device re-upload something the server already has.
+        return str(final_path.stat().st_size), 200, {"Content-Type": "text/plain"}
+    if part_path.exists():
+        return str(part_path.stat().st_size), 200, {"Content-Type": "text/plain"}
+    return "0", 200, {"Content-Type": "text/plain"}
+
+
+@app.route("/upload/chunk", methods=["POST"])
+@upload_token_required
+def upload_chunk():
+    """Appends one chunk to a resumable upload. The offset the device claims
+    (X-Chunk-Offset) must match how many bytes this file already has server-
+    side, or the request is rejected with the true offset (409) instead of
+    silently appending in the wrong place - that's what makes a retried or
+    reordered chunk safe rather than corrupting the partial file."""
+    name = request.headers.get("X-File-Name", "")
+    if not name:
+        return "missing X-File-Name", 400
+    try:
+        offset = int(request.headers.get("X-Chunk-Offset", ""))
+    except ValueError:
+        return "missing/invalid X-Chunk-Offset", 400
+    is_final = request.headers.get("X-Upload-Final", "") == "1"
+
+    safe_name = sanitize_upload_filename(name)
+    final_path = RAW_AUDIO_DIR / safe_name
+    part_path = RAW_AUDIO_DIR / f"{safe_name}.part"
+
+    if final_path.exists():
+        # Finalized by an earlier attempt already - tell the device it's
+        # done instead of erroring on a .part file that no longer exists.
+        return f"{final_path.stat().st_size} COMPLETE", 200, {"Content-Type": "text/plain"}
+
+    current_size = part_path.stat().st_size if part_path.exists() else 0
+    if offset != current_size:
+        return str(current_size), 409, {"Content-Type": "text/plain"}
+
+    with open(part_path, "ab") as f:
+        while True:
+            piece = request.stream.read(CHUNK_READ_BUFFER)
+            if not piece:
+                break  # client disconnected mid-chunk - keep whatever landed, device will resume from it
+            f.write(piece)
+        f.flush()
+        os.fsync(f.fileno())  # survive a server crash between chunks, not just an app-level error
+
+    new_size = part_path.stat().st_size
+
+    if not is_final:
+        return str(new_size), 200, {"Content-Type": "text/plain"}
+
+    meeting_name = sanitize_meeting_name(Path(safe_name).stem)
+    part_path.rename(final_path)
+    meeting_id = store.create(meeting_name, str(final_path), new_size)
+    _enqueue("transcribe", (meeting_id, final_path, meeting_name))
+    print(f"Chunked upload complete: {final_path} ({new_size} bytes)")
+    return f"{new_size} COMPLETE", 200, {"Content-Type": "text/plain"}
 
 
 def wav_duration_seconds(wav_path: str) -> float | None:

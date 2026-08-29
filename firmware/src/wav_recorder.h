@@ -10,6 +10,12 @@
 // finalizing the WAV header (file size isn't known until recording stops,
 // so the 44-byte header is written twice - once as a placeholder, once with
 // real sizes at close()).
+//
+// Uses the default global SPI object (FSPI on ESP32-C6), which the LCD
+// deliberately does NOT share - see ui_display.h, which binds its own
+// SPIClass to HSPI instead. That keeps this class's SD access (called both
+// from loop()'s recording path and from upload_worker.h's background task)
+// on hardware the LCD never touches, so no locking is needed here.
 
 #pragma pack(push, 1)
 struct WavHeader {
