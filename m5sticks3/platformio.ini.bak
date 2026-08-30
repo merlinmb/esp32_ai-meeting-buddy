@@ -1,0 +1,29 @@
+; AI Meeting Buddy firmware
+; Board: M5 StickS3 (ESP32-S3)
+; Open this folder in VS Code with the PlatformIO extension installed.
+;
+; Board definition (boards/_boards_json/m5stack-sticks3.json) and pin
+; variant (boards/pinouts/pins_arduino.h) are copied from the Bruce
+; firmware's verified m5stack-sticks3 board files.
+
+[platformio]
+boards_dir = boards/_boards_json
+
+[env:m5sticks3]
+platform = espressif32
+board = m5stack-sticks3
+board_build.partitions = custom_8Mb.csv
+board_build.variants_dir = boards
+framework = arduino
+monitor_speed = 115200
+upload_speed = 921600
+
+build_flags =
+    -DCORE_DEBUG_LEVEL=3
+    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_CDC_ON_BOOT=1
+    -DBOARD_HAS_PSRAM
+
+lib_deps =
+    m5stack/M5Unified @ ^0.2
+    m5stack/M5GFX @ ^0.2
