@@ -4,7 +4,7 @@
 // ============================================================================
 
 // ---- Display (M5Unified/M5GFX handles automatically) ---------------------
-// M5StickS3 has 80x160 display, controlled via M5Unified
+// M5StickS3 has a 135x240 display (ST7789), controlled via M5Unified
 
 // ---- Audio ------------------------------------------------------------
 // Mic (I2S + ES8311 codec) is handled by M5Unified's M5.Mic - it knows

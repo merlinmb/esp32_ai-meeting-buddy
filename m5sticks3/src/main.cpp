@@ -48,6 +48,21 @@ static AudioVisualizer visualizer;
 static WavPlayer player;
 
 static bool sdOk = false;
+// Set whenever we transition into IDLE (see goIdle()) or show a full-screen
+// interstitial while already IDLE - the next idle redraw needs a full
+// fillScreen() rather than its normal partial/non-clearing update, or
+// whatever was on screen before (a menu, an error) stays visible
+// underneath. Plain "state = State::IDLE" elsewhere in loop()'s switch
+// doesn't reach the IDLE case's redraw until the following iteration, by
+// which point the transition-detection based on state history has already
+// missed its edge - this flag makes the "just arrived" signal explicit and
+// independent of that timing.
+static bool forceIdleRedraw = false;
+
+void goIdle() {
+  state = State::IDLE;
+  forceIdleRedraw = true;
+}
 static bool screenOn = true;
 static unsigned long lastActivityMs = 0;
 static unsigned long recordingStartMs = 0;
@@ -62,22 +77,22 @@ static unsigned long lastUploadAttemptMs = 0;
 static uint32_t lastRecordingSeconds = 0;
 
 static std::vector<MenuItem> kMenuItems = {
-  {"Playback", 'i'},
-  {"Upload now", 'i'},
-  {"WiFi info", 'i'},
-  {"Storage", 'g'},  // icon kept in sync with sdOk in refreshMenuIcons()
-  {"About", 'i'},
-  {"Power off", 'c'},
-  {"Exit", 0},
+  {"Playback", Glyph::kPlay},
+  {"Upload now", Glyph::kUpload},
+  {"WiFi info", Glyph::kWifi},
+  {"Storage", Glyph::kDisk},  // flips to a critical glyph in refreshMenuIcons() when SD is missing
+  {"About", Glyph::kInfo},
+  {"Power off", Glyph::kPower},
+  {"Exit", Glyph::kExit},
 };
 static int menuSelectedIndex = 0;
 static unsigned long menuLastActivityMs = 0;
 
-// Storage's menu icon reflects live SD status (good when mounted, critical
-// when missing/failed) rather than a static glyph.
+// Storage's menu glyph reflects live SD status (disk icon when mounted,
+// critical X when missing/failed) rather than a static icon.
 void refreshMenuIcons() {
   for (auto &item : kMenuItems) {
-    if (String(item.label) == "Storage") item.icon = sdOk ? 'g' : 'c';
+    if (String(item.label) == "Storage") item.glyph = sdOk ? Glyph::kDisk : Glyph::kCrit;
   }
 }
 
@@ -123,17 +138,19 @@ bool hasPendingUploads() {
 void startRecording() {
   if (!sdOk) {
     ui.showStatus(Severity::kCrit, "No SD card",
-                  {"Recordings can't", "be saved.", "", "Insert a card, then", "press to retry."},
+                  {"Recordings can't be saved.", "", "Insert a card, then press to retry."},
                   "PRESS  retry");
     delay(1500);
+    forceIdleRedraw = true;
     return;
   }
   String base = clock_.filenameTimestamp();
   if (!recorder.startNewFile(base)) {
     ui.showStatus(Severity::kCrit, "Save failed",
-                  {"Recording stopped.", "Last few seconds", "may be lost.", "", "Check SD space,", "then retry."},
+                  {"Recording stopped. Last few seconds may be lost.", "", "Check SD space, then retry."},
                   "PRESS  retry");
     delay(1500);
+    forceIdleRedraw = true;
     return;
   }
   visualizer.reset();
@@ -145,7 +162,7 @@ void stopRecording() {
   lastRecordingSeconds = (millis() - recordingStartMs) / 1000;
   recorder.close();
   M5.Mic.end();  // release I2S/codec between recordings to save power
-  state = State::IDLE;
+  goIdle();
 }
 
 void pumpAudioToSd() {
@@ -174,10 +191,10 @@ void tryUpload() {
 
   if (!uploader.connect()) {
     ui.showStatus(Severity::kWarn, "Wi-Fi offline",
-                  {"Recording still", "saves to SD.", "", "Uploads once Wi-Fi", "reconnects."},
+                  {"Recording still saves to SD.", "", "Uploads once Wi-Fi reconnects."},
                   "PRESS  ok");
     delay(1500);
-    state = State::IDLE;
+    goIdle();
     return;
   }
 
@@ -186,7 +203,7 @@ void tryUpload() {
   });
 
   uploader.disconnect();
-  state = State::IDLE;
+  goIdle();
 }
 
 void enterPlaybackList() {
@@ -201,7 +218,7 @@ void startPlayback() {
   if (playbackList.empty()) return;
   if (!player.open(playbackList[playbackSelectedIndex])) {
     ui.showStatus(Severity::kCrit, "Can't play file",
-                  {"May be corrupted or", "still uploading.", "", "Try another", "recording."},
+                  {"May be corrupted or still uploading.", "", "Try another recording."},
                   "HOLD  back");
     delay(1000);
     ui.showRecordingList(playbackList, playbackSelectedIndex);
@@ -226,16 +243,15 @@ void showWifiInfoScreen() {
   lines.push_back(WiFi.status() == WL_CONNECTED
                        ? ("IP: " + WiFi.localIP().toString())
                        : String("Not connected"));
-  lines.push_back("(WiFi only powers on");
-  lines.push_back(" to upload recordings)");
-  ui.showInfo("WIFI", lines);
+  lines.push_back("");
+  lines.push_back("Wi-Fi only powers on to upload recordings.");
+  ui.showInfo("WIFI", lines, Glyph::kWifi);
 }
 
 void showStorageInfoScreen() {
   std::vector<String> lines;
   if (!sdOk) {
-    lines.push_back("SD card fault -");
-    lines.push_back("no card detected");
+    lines.push_back("No SD card detected.");
   } else {
     uint64_t totalMb = SD.totalBytes() / (1024ULL * 1024ULL);
     uint64_t usedMb = SD.usedBytes() / (1024ULL * 1024ULL);
@@ -247,14 +263,20 @@ void showStorageInfoScreen() {
     snprintf(buf, sizeof(buf), "%d recording(s) pending upload", pendingCount);
     lines.push_back(buf);
   }
-  ui.showInfo("STORAGE", lines);
+  ui.showInfo("STORAGE", lines, sdOk ? Glyph::kDisk : Glyph::kCrit);
 }
 
 void showAboutScreen() {
   std::vector<String> lines;
   lines.push_back(String("AI Meeting Buddy v") + DEVICE_VERSION);
   lines.push_back("M5 StickS3");
-  ui.showInfo("ABOUT", lines);
+  lines.push_back("");
+  char buf[32];
+  snprintf(buf, sizeof(buf), "Battery: %d%%", readBatteryPercent());
+  lines.push_back(buf);
+  lines.push_back(sdOk ? "SD card: OK" : "SD card: missing");
+  lines.push_back(WiFi.status() == WL_CONNECTED ? "Wi-Fi: connected" : "Wi-Fi: offline");
+  ui.showInfo("ABOUT", lines, Glyph::kInfo);
 }
 
 // Executes the currently-selected menu item, then decides what state comes next.
@@ -270,7 +292,7 @@ void runSelectedMenuItem() {
     return;
   }
   if (label == "Exit") {
-    state = State::IDLE;
+    goIdle();
     return;
   }
   if (label == "Power off") {
@@ -295,28 +317,32 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
 
-  if (!ui.begin()) {
-    Serial.println("LCD init failed");
-  }
+  bool lcdOk = ui.begin();
+  ui.beginBootLog(DEVICE_VERSION);
+  ui.bootLog(lcdOk ? "Display ready" : "Display init failed", lcdOk ? Severity::kGood : Severity::kCrit);
+  if (!lcdOk) Serial.println("LCD init failed");
 
   sdOk = recorder.beginSd();
-  if (!sdOk) {
-    Serial.println("SD init failed - check wiring/pins.h");
-  }
+  ui.bootLog(sdOk ? "SD card mounted" : "No SD card found", sdOk ? Severity::kGood : Severity::kWarn);
+  if (!sdOk) Serial.println("SD init failed - check wiring/pins.h");
 
   button.begin();
   encoder.begin();
-
-  ui.showMessage("AI Meeting Buddy", {"Starting up..."});
+  ui.bootLog("Controls ready", Severity::kGood);
 
   // Best-effort: no RTC chip on this board, so get wall-clock time from
   // NTP if WiFi is reachable. Recording still works if this fails/times
   // out - filenameTimestamp() falls back to a millis()-based name.
   if (uploader.connect()) {
-    clock_.sync();
+    ui.bootLog("Wi-Fi connected", Severity::kGood);
+    bool synced = clock_.sync();
+    ui.bootLog(synced ? "Clock synced" : "Clock sync failed", synced ? Severity::kGood : Severity::kWarn);
     uploader.disconnect();
+  } else {
+    ui.bootLog("Wi-Fi unavailable", Severity::kWarn);
   }
 
+  ui.bootLog("Ready", Severity::kGood);
   delay(800);
   lastActivityMs = millis();
 }
@@ -381,8 +407,13 @@ void loop() {
     shakeBack = false;
   }
 
-  static State lastLoopState = State::IDLE;
-  bool justEnteredIdle = (state == State::IDLE && lastLoopState != State::IDLE);
+  // lastLoopState starts as PLAYING (never IDLE) specifically so the very
+  // first loop() iteration after boot is treated as "just entered idle" -
+  // otherwise the first idle draw uses clearFirst=false and paints over
+  // whatever the boot log left on screen above its own redraw region.
+  static State lastLoopState = State::PLAYING;
+  bool justEnteredIdle = (state == State::IDLE && lastLoopState != State::IDLE) || forceIdleRedraw;
+  forceIdleRedraw = false;
   lastLoopState = state;
 
   switch (state) {
@@ -395,7 +426,7 @@ void loop() {
         enterMenu();
         break;
       }
-      if (screenOn && millis() - lastIdleRedrawMs > 1000) {
+      if (screenOn && (justEnteredIdle || millis() - lastIdleRedrawMs > 1000)) {
         lastIdleRedrawMs = millis();
         RtcTime t;
         char clockBuf[16] = "--:--";
@@ -461,7 +492,7 @@ void loop() {
         menuLastActivityMs = millis();
         runSelectedMenuItem();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
-        state = State::IDLE;  // walked away / forgot about it
+        goIdle();  // walked away / forgot about it
       }
       break;
     }
@@ -473,7 +504,7 @@ void loop() {
       if (ev == ButtonEvent::LONG || ev == ButtonEvent::SHORT) {
         enterMenu();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
-        state = State::IDLE;
+        goIdle();
       }
       break;
     }
@@ -496,7 +527,7 @@ void loop() {
       } else if (ev == ButtonEvent::LONG || shakeBack) {
         enterMenu();
       } else if (millis() - playbackLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
-        state = State::IDLE;
+        goIdle();
       }
       break;
     }

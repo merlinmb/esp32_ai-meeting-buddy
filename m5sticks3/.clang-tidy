@@ -1,0 +1,16 @@
+Checks: 'readability-identifier-naming'
+CheckOptions:
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: lowerCamelCase
+  - key: readability-identifier-naming.MemberCase
+    value: lowerCamelCase
+  - key: readability-identifier-naming.MemberPrefix
+    value: '_'
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lowerCamelCase
+  - key: readability-identifier-naming.LocalVariablePrefix
+    value: '__'
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.ConstantCase
+    value: UPPER_CASE
