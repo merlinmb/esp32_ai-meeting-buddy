@@ -14,12 +14,17 @@
 //
 // If audio comes out silent, distorted, or at the wrong pitch/speed after you
 // get everything else working: that's almost always an MCLK/PLL mismatch,
-// not a wiring problem. The reliable fix is to copy the codec init from
-// Waveshare's own Arduino library for this board:
-//   https://github.com/waveshareteam/ESP32-C6-LCD-1.9  (01_Arduino_Libraries)
-// and drop it in here in place of ES8311::begin()'s register writes - the
-// rest of this firmware (recording state machine, SD, LCD, upload) doesn't
-// need to change either way.
+// not a wiring problem. The reliable fix is to copy the codec init from a
+// known-working reference for this exact board:
+//   https://github.com/aedile/PELLETINO  (demo/Arduino/examples/04_es8311_example/)
+// - a different project built on this same ESP32-C6-LCD-1.69 hardware. (The
+// similarly-named github.com/waveshareteam/ESP32-C6-LCD-1.9 is a *different*,
+// 1.9"-display sibling board - its ES8311 register sequence is still a
+// reasonable generic reference since it's the same codec chip, but its
+// GPIO numbers do NOT apply here; see pins.h.)
+// Drop whichever sequence you use in here in place of ES8311::begin()'s
+// register writes - the rest of this firmware (recording state machine, SD,
+// LCD, upload) doesn't need to change either way.
 // ============================================================================
 
 class ES8311 {

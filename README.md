@@ -8,7 +8,7 @@ The AI Meeting Buddy combines embedded recording hardware with a companion trans
 
 ### Key Features
 
-- **Single-button gesture control:** short press to record, long press for menu access
+- **Two-button control:** BOOT starts/stops recording (and cycles menu items), PWR opens the menu (and selects the highlighted item)
 - **Live waveform visualization:** see actual audio levels on the 1.69" display while recording
 - **Local storage:** all meetings saved to microSD card before upload
 - **Offline-capable:** transcription can run entirely on your own infrastructure with local Whisper
@@ -22,8 +22,8 @@ The AI Meeting Buddy combines embedded recording hardware with a companion trans
 ```
 ├── firmware/              # ESP32-C6 embedded firmware (PlatformIO)
 │   ├── src/
-│   │   ├── main.cpp       # Button gestures, state machine, UI screens
-│   │   ├── pins.h         # GPIO configuration (TODO: fill in for your board)
+│   │   ├── main.cpp       # Button handling, state machine, UI screens
+│   │   ├── pins.h         # GPIO configuration (schematic-confirmed - see build-guide.md section 2)
 │   │   ├── config.h       # WiFi & upload server settings
 │   │   ├── i2s_capture.h  # Microphone capture via I2S
 │   │   ├── sd_wav.h       # WAV file recording to SD card
@@ -56,11 +56,10 @@ The AI Meeting Buddy combines embedded recording hardware with a companion trans
 
 See [`firmware/README.md`](firmware/README.md) for detailed setup instructions:
 
-1. Confirm GPIO pin numbers from Waveshare's schematic and populate `firmware/src/pins.h`
-2. Wire the microSD card breakout board per [`build-guide.md` section 2](build-guide.md#2-wiring-sd-card-module)
-3. Set WiFi credentials in `firmware/src/config.h`
-4. Build and flash: `pio run && pio run -t upload`
-5. Run smoke tests (see firmware README section "First smoke test")
+1. Wire the microSD card breakout board per [`build-guide.md` section 2](build-guide.md#2-wiring-sd-card-module) - `firmware/src/pins.h` already has the confirmed GPIO numbers
+2. Set WiFi credentials in `firmware/src/config.h`
+3. Build and flash: `pio run && pio run -t upload`
+4. Run smoke tests (see firmware README section "First smoke test")
 
 ### 2. Deploy the Transcription Server
 
@@ -86,7 +85,7 @@ cd server
 
 ### 3. Test the Full Pipeline
 
-1. Record a short test meeting on the device (press button to start/stop)
+1. Record a short test meeting on the device (BOOT to start/stop)
 2. From the device menu, select "Upload now"
 3. Check the server logs for transcription and Claude processing
 4. Retrieved the processed transcript from the server output location
@@ -149,12 +148,12 @@ See [`build-guide.md` section 1](build-guide.md#1-hardware-overview) for detaile
 ### `firmware/`
 
 A PlatformIO project (Arduino-based C++). Handles:
-- Button input (gesture recognition: short-press vs. long-press)
+- Button input (BOOT = record/next, PWR = menu/select - two dedicated buttons, no gesture timing)
 - I2S audio capture from the ES8311 codec
 - WAV file writing to SD card
 - Waveform visualization on the LCD
 - Menu state machine (idle, recording, upload, info screens)
-- WiFi upload of .wav files to the server
+- Background-task WiFi upload of .wav files to the server, resumable and interruptible by recording
 
 **Before building:** see [`firmware/README.md`](firmware/README.md) for configuration requirements.
 
@@ -183,7 +182,7 @@ See [`server/README.md`](server/README.md) for detailed setup.
 
 ### Firmware (`firmware/src/`)
 
-- **`pins.h`** — GPIO assignments (TODO: fill in from Waveshare schematic)
+- **`pins.h`** — GPIO assignments (schematic-confirmed, see `build-guide.md` section 2)
 - **`config.h`** — WiFi SSID/password, upload server URL, timeouts
 - **`es8311_codec.h`** — Audio codec register sequence (adjust if audio is distorted)
 
@@ -213,10 +212,6 @@ The ESP32-C6 and codec draw ~50 mA during recording. The LCD draws ~20 mA. WiFi 
 
 ## Extending the Project
 
-### Add a Second Button
-
-The current firmware uses one button with short/long-press gestures (cycle through menu, select). Wiring a second button to a free GPIO would let you implement dedicated "next" and "select" buttons for faster menu navigation. See `firmware/src/main.cpp` for the button logic.
-
 ### Use a Hosted ASR API
 
 Swap `faster-whisper` for OpenAI Whisper, Deepgram, or AssemblyAI by editing the `transcribe()` function in `server/receive_and_transcribe.py`. Each API has its own library and cost model.
@@ -236,7 +231,7 @@ The receiver script already supports sending emails via SMTP. Set `SMTP_SERVER`,
 ## Support & Troubleshooting
 
 - **Firmware won't build?** Check that PlatformIO is installed and the project is opened in VS Code with the PlatformIO sidebar.
-- **SD card not detected?** Verify GPIO pins in `pins.h` against Waveshare's schematic; confirm wiring per `build-guide.md` section 2.
+- **SD card not detected?** Confirm your physical wiring matches `pins.h`/`build-guide.md` section 2 (GPIO16/17/12/13); the idle screen's SD ring shows "NO SD CARD" if it didn't mount (there's no serial console to check instead - see the note in `firmware/README.md`).
 - **Microphone silent?** Review the codec init sequence in `es8311_codec.h` and the I2S capture setup in `i2s_capture.h`.
 - **WiFi upload fails?** Ensure the server is reachable and `UPLOAD_SERVER_URL` in `config.h` is correct.
 - **Transcription errors?** Check server logs for ASR/Claude API failures; ensure `ANTHROPIC_API_KEY` is set.

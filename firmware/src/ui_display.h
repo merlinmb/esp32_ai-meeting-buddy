@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <SPI.h>
 #include <Arduino_GFX_Library.h>
 #include <vector>
 #include "pins.h"
@@ -8,6 +9,15 @@
 // Status/menu UI for the 240x280 ST7789. Everything's drawn with primitive
 // shapes + text (no image assets), organized as a few full-screen "views" so
 // each state in main.cpp maps to exactly one draw call.
+//
+// Uses Arduino_HWSPI, not Arduino_ESP32SPI: the latter's fast direct-register
+// path doesn't support the ESP32-C6 at all (excluded outright in the GFX
+// library's own target list - confirmed against the exact library version
+// Waveshare's own C6 demo firmware ships, which uses Arduino_HWSPI for the
+// same reason). Arduino_HWSPI goes through the standard SPIClass API, so it
+// gets its own SPI peripheral (HSPI) explicitly bound below - separate from
+// the SD card's default SPIClass (FSPI, see wav_recorder.h) - so the LCD and
+// the upload worker's background SD reads never touch the same hardware.
 
 struct MenuItem {
   const char *label;
@@ -16,7 +26,7 @@ struct MenuItem {
 class UiDisplay {
  public:
   bool begin() {
-    _bus = new Arduino_ESP32SPI(PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCLK, PIN_LCD_MOSI, GFX_NOT_DEFINED /* MISO not used by LCD */);
+    _bus = new Arduino_HWSPI(PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCLK, PIN_LCD_MOSI, GFX_NOT_DEFINED /* MISO not used by LCD */, &_lcdSpi);
     _gfx = new Arduino_ST7789(_bus, PIN_LCD_RST, 0 /* rotation */, true /* IPS */, 240, 280);
     if (!_gfx->begin()) return false;
 
@@ -88,7 +98,7 @@ class UiDisplay {
     _gfx->setCursor(cardX + 10, cardY + 34);
     _gfx->print(durBuf);
 
-    drawFooter("press: record", "hold: menu");
+    drawFooter("BOOT: record", "PWR: menu");
   }
 
   // ---- Recording: live waveform + elapsed time -------------------------
@@ -113,7 +123,7 @@ class UiDisplay {
 
     drawWaveform(viz, /*top=*/120, /*height=*/100);
 
-    drawFooter("press: stop", "");
+    drawFooter("BOOT: stop", "");
   }
 
   // ---- Upload progress ---------------------------------------------------
@@ -133,6 +143,31 @@ class UiDisplay {
       int fillW = (int)((barW - 4) * ((float)doneCount / (float)totalCount));
       _gfx->fillRoundRect(barX + 2, barY + 2, fillW, barH - 4, 3, _accent);
     }
+
+    // Recording still wins instantly even with an upload in flight (see
+    // upload_worker.h), so the footer matches the idle screen's, not a
+    // pause/cancel prompt.
+    drawFooter("BOOT: record", "PWR: menu");
+  }
+
+  // ---- Upload failed: shown until the next retry (auto or from the menu) -
+  void showUploadFailed(int failedCount, int totalCount) {
+    beginFrame("UPLOAD FAILED");
+
+    int sentCount = totalCount - failedCount;
+    _gfx->setTextColor(_danger);
+    _gfx->setTextSize(3);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%d / %d sent", sentCount, totalCount);
+    centerText(buf, 90);
+
+    _gfx->setTextColor(_muted);
+    _gfx->setTextSize(2);
+    centerText("Will auto-retry", 140);
+
+    // Same button behavior as idle - this is just an informational overlay,
+    // not a separate screen with its own gestures.
+    drawFooter("BOOT: record", "PWR: menu");
   }
 
   // ---- Menu: scrollable single-column list, one item highlighted --------
@@ -153,7 +188,7 @@ class UiDisplay {
       y += 40;
     }
 
-    drawFooter("press: next", "hold: select");
+    drawFooter("BOOT: next", "PWR: select");
   }
 
   void showInfo(const String &title, const std::vector<String> &lines) {
@@ -166,7 +201,7 @@ class UiDisplay {
       _gfx->print(line);
       y += 28;
     }
-    drawFooter("hold: back", "");
+    drawFooter("back", "");
   }
 
   void showMessage(const String &msg) {
@@ -178,6 +213,9 @@ class UiDisplay {
   }
 
  private:
+  // Dedicated SPI peripheral for the LCD - see the class comment above for
+  // why this needs to be its own SPIClass instance rather than the default.
+  SPIClass _lcdSpi{HSPI};
   Arduino_DataBus *_bus = nullptr;
   Arduino_GFX *_gfx = nullptr;
   uint16_t _bg, _panel, _accent, _danger, _text, _muted;
