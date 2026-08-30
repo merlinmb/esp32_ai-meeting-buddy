@@ -2,71 +2,94 @@
 #include <Arduino.h>
 #include "pins.h"
 
-// Gesture detector for the single onboard side button (see pins.h comments -
-// PWR is a hardware switch and BOOT/RST are reserved for flashing, so this
-// is the only button safe to repurpose in application code).
+// Interrupt-driven press detector for a single onboard button (see pins.h
+// comments - PWR is a hardware switch and BOOT/RST are reserved for
+// flashing, so G11/G12 are the only pins safe to repurpose in application
+// code).
 //
-// Two gestures, no double-click: a menu that needs to feel instant can't
-// afford the ~300ms "wait and see if they click again" delay double-click
-// detection requires, so short-press always fires immediately on release
-// and long-press fires as soon as the hold threshold is crossed (while
-// still held, so "hold to open menu" feels responsive too).
+// With two physical buttons (G11 = select/record, G12 = navigate) there's
+// no more need for a timed hold gesture - each button reports a single
+// PRESSED event, fired on the press edge. The edge itself is captured by a
+// GPIO interrupt (not polled), so a press isn't missed even if loop() is
+// busy for a while (SD writes, network calls, etc); poll() just debounces
+// and drains that captured edge once per loop() iteration. The same ISR
+// wiring is also what lets this pin wake the device from deep sleep later
+// (ext0/ext1), which plain polling can't do.
 
-enum class ButtonEvent { NONE, SHORT, LONG };
+enum class ButtonEvent { NONE, PRESSED };
 
-class RecordButton {
+namespace record_button_detail {
+// Interrupts need C-linkage free functions with file-scope state (see
+// rotary_encoder.h for why: IRAM_ATTR on inline class member functions can
+// trip an l32r relocation error at link time). Two independent buttons need
+// two independent ISRs/state slots, so this is templated on pin index
+// rather than reusable across instances.
+template <int kIndex>
+struct ButtonIsrState {
+  static volatile bool pressedEdge;
+  static volatile unsigned long edgeMs;
+  static int pin;
+  static bool activeLow;
+};
+template <int kIndex> volatile bool ButtonIsrState<kIndex>::pressedEdge = false;
+template <int kIndex> volatile unsigned long ButtonIsrState<kIndex>::edgeMs = 0;
+template <int kIndex> int ButtonIsrState<kIndex>::pin = -1;
+template <int kIndex> bool ButtonIsrState<kIndex>::activeLow = true;
+
+template <int kIndex>
+void IRAM_ATTR onButtonEdge() {
+  using S = ButtonIsrState<kIndex>;
+  bool raw = digitalRead(S::pin);
+  bool active = S::activeLow ? (raw == LOW) : (raw == HIGH);
+  if (active) {
+    S::pressedEdge = true;
+    S::edgeMs = millis();
+  }
+}
+}  // namespace record_button_detail
+
+template <int kIndex>
+class RecordButtonT {
  public:
+  RecordButtonT(int pin, bool activeLow) {
+    using S = record_button_detail::ButtonIsrState<kIndex>;
+    S::pin = pin;
+    S::activeLow = activeLow;
+  }
+
   void begin() {
-    pinMode(PIN_RECORD_BUTTON, RECORD_BUTTON_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
+    using namespace record_button_detail;
+    using S = ButtonIsrState<kIndex>;
+    pinMode(S::pin, S::activeLow ? INPUT_PULLUP : INPUT);
+    S::pressedEdge = false;
+    attachInterrupt(digitalPinToInterrupt(S::pin), onButtonEdge<kIndex>, S::activeLow ? FALLING : RISING);
   }
 
   // Call once per loop() iteration.
   ButtonEvent poll() {
-    bool raw = digitalRead(PIN_RECORD_BUTTON);
-    bool active = RECORD_BUTTON_ACTIVE_LOW ? (raw == LOW) : (raw == HIGH);
+    using namespace record_button_detail;
+    using S = ButtonIsrState<kIndex>;
+
+    noInterrupts();
+    bool edge = S::pressedEdge;
+    unsigned long edgeMs = S::edgeMs;
+    if (edge) S::pressedEdge = false;
+    interrupts();
+
+    if (!edge) return ButtonEvent::NONE;
+
+    // Debounce: ignore an edge that follows too closely on the last
+    // accepted one (contact bounce firing several interrupts per press).
     unsigned long now = millis();
-
-    // Debounce: ignore changes until the level's been stable for kDebounceMs.
-    if (active != _rawActive) {
-      _rawActive = active;
-      _lastEdgeMs = now;
-      return ButtonEvent::NONE;
-    }
-    if ((now - _lastEdgeMs) < kDebounceMs) return ButtonEvent::NONE;
-
-    if (active && !_stableActive) {
-      // Press just started.
-      _stableActive = true;
-      _pressStartMs = now;
-      _longFired = false;
-      return ButtonEvent::NONE;
-    }
-
-    if (active && _stableActive && !_longFired && (now - _pressStartMs) >= kLongPressMs) {
-      // Still held past the threshold - fire LONG once, immediately.
-      _longFired = true;
-      return ButtonEvent::LONG;
-    }
-
-    if (!active && _stableActive) {
-      // Released.
-      _stableActive = false;
-      bool wasLong = _longFired;
-      _longFired = false;
-      if (!wasLong) return ButtonEvent::SHORT;  // short click confirmed on release
-      return ButtonEvent::NONE;                  // LONG already fired while held
-    }
-
-    return ButtonEvent::NONE;
+    if ((now - _lastAcceptedMs) < kDebounceMs && _lastAcceptedMs != 0) return ButtonEvent::NONE;
+    _lastAcceptedMs = edgeMs;
+    return ButtonEvent::PRESSED;
   }
 
  private:
   static const unsigned long kDebounceMs = 30;
-  static const unsigned long kLongPressMs = 600;
-
-  bool _rawActive = false;
-  bool _stableActive = false;
-  bool _longFired = false;
-  unsigned long _lastEdgeMs = 0;
-  unsigned long _pressStartMs = 0;
+  unsigned long _lastAcceptedMs = 0;
 };
+
+using RecordButton = RecordButtonT<0>;
+using NavButton = RecordButtonT<1>;

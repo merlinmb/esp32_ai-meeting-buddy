@@ -74,7 +74,7 @@ class UiDisplay {
     char durBuf[16];
     snprintf(durBuf, sizeof(durBuf), "%02lu:%02lu", (unsigned long)m, (unsigned long)s);
     char sdBuf[16];
-    snprintf(sdBuf, sizeof(sdBuf), "%d%% free", (int)(sdFreePct + 0.5f));
+    snprintf(sdBuf, sizeof(sdBuf), "%d%%", (int)(sdFreePct + 0.5f));
     char batBuf[8];
     snprintf(batBuf, sizeof(batBuf), "%d%%", batteryPercent);
 
@@ -89,13 +89,24 @@ class UiDisplay {
     y = drawStatusRow("Battery", batBuf, Severity::kInfo, y, step);
     drawStatusRow("Last rec", durBuf, Severity::kInfo, y, step);
 
-    drawFooter("PRESS  record", "HOLD  menu");
+    drawFooter("record", false, "menu", true);
   }
 
   // Recording: pulsing red dot (not just a static label) so "recording" is
   // legible as an active state, big timer, live waveform confirming audio.
-  void showRecording(uint32_t elapsedSeconds, const AudioVisualizer &viz) {
-    M5.Lcd.fillScreen(_bg);
+  // Called every ~120ms while recording, so this only ever repaints the
+  // regions that actually changed (dot pulse, waveform, and the timer text
+  // when the second ticks over) instead of fillScreen()-ing the whole
+  // display each time - a full clear at that rate is what caused the
+  // visible flicker. firstDraw draws the screen's static chrome once.
+  void showRecording(uint32_t elapsedSeconds, const AudioVisualizer &viz, bool firstDraw) {
+    if (firstDraw) {
+      M5.Lcd.fillScreen(_bg);
+      leftText("REC", 34, 14, _crit, kScaleLabel);
+      centerText("Listening...", 188, _muted, kScaleBody);
+      drawFooter("stop", false);
+      _recLastTimerBuf = "";
+    }
 
     // Pulse driven by elapsed wall time so it animates across redraws
     // without needing its own timer/state.
@@ -103,41 +114,68 @@ class UiDisplay {
     float pulse = 0.55f + 0.45f * fabsf(sinf(phase * 3.14159f));
     uint16_t dotColor = blend(_bg, _crit, pulse);
     M5.Lcd.fillCircle(18, 22, 7, dotColor);
-    leftText("REC", 34, 14, _crit, kScaleLabel);
 
     char buf[8];
     snprintf(buf, sizeof(buf), "%02lu:%02lu", (unsigned long)(elapsedSeconds / 60), (unsigned long)(elapsedSeconds % 60));
-    centerText(buf, 48, _text, kScaleBig);
+    if (_recLastTimerBuf != buf) {
+      _recLastTimerBuf = buf;
+      M5.Lcd.fillRect(0, 40, _w, 32, _bg);  // erase old timer text before drawing the new value
+      centerText(buf, 48, _text, kScaleBig);
+    }
 
     drawWaveform(viz, 130, 50);
-    centerText("Listening...", 188, _muted, kScaleBody);
-
-    drawFooter("PRESS  stop");
   }
 
   // Upload progress: names what's happening and reassures the recording is
   // safe on SD until the upload is confirmed, instead of a bare fraction.
-  void showUploading(int doneCount, int totalCount) {
-    M5.Lcd.fillScreen(_bg);
+  // Called once per file as uploads complete, so - like showRecording()/
+  // showPlayback() - only the count text and progress fill are repainted
+  // per call; static chrome (icon, title, border, reassurance text) draws
+  // once via firstDraw.
+  //
+  // Header uses the same icon+title layout as showInfo()/showRecordingList()
+  // - Glyph::kUpload, same as "Upload now" in the main menu - instead of a
+  // centered generic info ring, so a sub-screen always carries the icon
+  // that led you into it.
+  // fileFraction is the current (not-yet-counted) file's own send progress
+  // (0..1) so the bar keeps moving while a single file is still in flight,
+  // instead of sitting still until the whole file completes.
+  void showUploading(int doneCount, int totalCount, bool firstDraw, float fileFraction = 0.0f) {
+    int barX = 14, barY = 120, barW = _w - 28, barH = 12;
 
-    drawIcon(Severity::kInfo, _w / 2, 40, -1, 10);
-    centerText("Uploading", 62, _text, kScaleLabel);
+    if (firstDraw) {
+      M5.Lcd.fillScreen(_bg);
+      drawGlyph(Glyph::kUpload, 22, 20, -1, -1, 10);
+      leftText("UPLOADING", 40, 14, _muted, kScaleBody);
+      M5.Lcd.drawRoundRect(barX, barY, barW, barH, 4, _muted);
+      for (auto &line : wrapAtScale("Kept on SD card until confirmed", kScaleBody, _w - 16)) {
+        centerText(line, 148, _muted, kScaleBody);
+      }
+      drawFooter("cancel", false);
+      _upLastCountBuf = "";
+      _upLastBarFillW = -1;
+    }
+
     char buf[24];
     snprintf(buf, sizeof(buf), "%d of %d file%s", doneCount, totalCount, totalCount == 1 ? "" : "s");
-    centerText(buf, 88, _muted, kScaleBody);
+    if (_upLastCountBuf != buf) {
+      _upLastCountBuf = buf;
+      M5.Lcd.fillRect(0, 84, _w, 12, _bg);  // erase old count text before drawing the new value
+      centerText(buf, 88, _muted, kScaleBody);
+    }
 
-    int barX = 14, barY = 120, barW = _w - 28, barH = 12;
-    M5.Lcd.drawRoundRect(barX, barY, barW, barH, 4, _muted);
     if (totalCount > 0) {
-      int fillW = (int)((barW - 2) * ((float)doneCount / (float)totalCount));
-      M5.Lcd.fillRoundRect(barX + 1, barY + 1, fillW, barH - 2, 3, _accent);
+      float overallFraction = ((float)doneCount + fileFraction) / (float)totalCount;
+      int fillW = (int)((barW - 2) * overallFraction);
+      if (fillW != _upLastBarFillW) {
+        _upLastBarFillW = fillW;
+        // Progress only ever grows here (doneCount/fileFraction are
+        // monotonic within an upload run), so no need to erase the track
+        // first the way the shrinkable recording waveform / playback scrub
+        // bar do.
+        M5.Lcd.fillRoundRect(barX + 1, barY + 1, fillW, barH - 2, 3, _accent);
+      }
     }
-
-    for (auto &line : wrapAtScale("Kept on SD card until confirmed", kScaleBody, _w - 16)) {
-      centerText(line, 148, _muted, kScaleBody);
-    }
-
-    drawFooter("HOLD  cancel");
   }
 
   // Menu: selection is a solid filled pill (not just an outline) so it's
@@ -145,7 +183,7 @@ class UiDisplay {
   // does (play triangle, upload arrow, wifi bars, disk, info, power, exit)
   // instead of every row carrying the same generic marker. Row spacing is
   // derived from how many items actually fit above the footer, so it can
-  // never grow into "PRESS/HOLD" the way a fixed step could, and every
+  // never grow into the footer's nav/select hints the way a fixed step could, and every
   // passed-in item is shown (no silent cap). All labels render at the same
   // fixed kScaleBody - no per-item shrinking, so weight stays consistent,
   // and body size (not the larger label size) keeps a 7-item menu compact.
@@ -172,7 +210,7 @@ class UiDisplay {
       y += step;
     }
 
-    drawFooter("PRESS  next", "HOLD  select");
+    drawFooter("select", false, "next", true);
   }
 
   // title icon identifies the screen (wifi rings for WIFI, info ring for
@@ -197,17 +235,21 @@ class UiDisplay {
       }
     }
 
-    drawFooter("HOLD  back");
+    drawFooter("back", false);
   }
 
   // List of recordings to choose for playback. Scrolls a window around the
   // selected index rather than trying to fit an arbitrary number of names.
+  // Header uses the same icon+title layout as showInfo()/showUploading(),
+  // and the same Glyph::kPlay shown for "Playback" in the main menu, so a
+  // sub-screen always carries the icon that led you into it.
   void showRecordingList(const std::vector<String> &names, int selectedIndex) {
     M5.Lcd.fillScreen(_bg);
-    leftText("PLAYBACK", 10, 10, _muted, kScaleBody);
+    drawGlyph(Glyph::kPlay, 22, 20, -1, -1, 10);
+    leftText("PLAYBACK", 40, 14, _muted, kScaleBody);
 
     if (names.empty()) {
-      centerText("No recordings", 100, _text, kScaleLabel);
+      centerText("No recordings", 100, _muted, kScaleBody);
     } else {
       const int kVisible = 6;
       int start = selectedIndex - kVisible / 2;
@@ -232,45 +274,73 @@ class UiDisplay {
       }
     }
 
-    drawFooter("PRESS  play", "HOLD  back");
+    drawFooter("play", false, "next", true);
   }
 
   // Playback: filename, elapsed/total, and a scrub bar composed as one
   // block so it reads as a single player rather than scattered facts.
-  void showPlayback(const String &name, uint32_t elapsedSeconds, uint32_t totalSeconds, bool paused) {
-    M5.Lcd.fillScreen(_bg);
+  // Called every ~200ms while playing, so - like showRecording() - this
+  // only repaints regions that actually changed (elapsed time text, scrub
+  // bar fill) instead of fillScreen()-ing the whole display each time.
+  // firstDraw draws the screen's static chrome once; pass it whenever name
+  // or paused changes too, since those affect the static parts.
+  //
+  // Header uses the same icon+title layout as showInfo()/showRecordingList()
+  // - Glyph::kPlay, same as "Playback" in the main menu - rather than a
+  // playing/paused status ring, so a sub-screen always carries the icon
+  // that led you into it; playing/paused is instead its own status line.
+  void showPlayback(const String &name, uint32_t elapsedSeconds, uint32_t totalSeconds, bool paused, bool firstDraw) {
+    if (firstDraw) {
+      M5.Lcd.fillScreen(_bg);
+      drawGlyph(Glyph::kPlay, 22, 20, -1, -1, 10);
+      leftText("PLAYBACK", 40, 14, _muted, kScaleBody);
+      leftText(paused ? "PAUSED" : "PLAYING", 12, 30, paused ? _muted : _good, kScaleLabel);
+      leftText(shortName(name), 12, 52, _text, kScaleBody);
+      drawFooter("pause", false);
+      _pbLastTimerBuf = "";
 
-    drawIcon(paused ? Severity::kInfo : Severity::kGood, 22, 20, -1, 9);
-    leftText(paused ? "PAUSED" : "PLAYING", 40, 12, paused ? _muted : _good, kScaleLabel);
-    leftText(shortName(name), 12, 42, _text, kScaleBody);
+      int barX = 14, barY = 104, barW = _w - 28, barH = 10;
+      M5.Lcd.fillRoundRect(barX, barY, barW, barH, 5, M5.Lcd.color565(42, 46, 55));
+    }
 
     char buf[24];
     snprintf(buf, sizeof(buf), "%02lu:%02lu / %02lu:%02lu",
              (unsigned long)(elapsedSeconds / 60), (unsigned long)(elapsedSeconds % 60),
              (unsigned long)(totalSeconds / 60), (unsigned long)(totalSeconds % 60));
-    centerText(buf, 74, _muted, kScaleBody);
-
-    int barX = 14, barY = 104, barW = _w - 28, barH = 10;
-    M5.Lcd.fillRoundRect(barX, barY, barW, barH, 5, M5.Lcd.color565(42, 46, 55));
-    if (totalSeconds > 0) {
-      int fillW = (int)(barW * ((float)elapsedSeconds / (float)totalSeconds));
-      M5.Lcd.fillRoundRect(barX, barY, fillW, barH, 5, _good);
+    if (_pbLastTimerBuf != buf) {
+      _pbLastTimerBuf = buf;
+      M5.Lcd.fillRect(0, 68, _w, 12, _bg);  // erase old elapsed/total text before drawing the new value
+      centerText(buf, 74, _muted, kScaleBody);
     }
 
-    drawFooter("PRESS  pause", "HOLD  back");
+    int barX = 14, barY = 104, barW = _w - 28, barH = 10;
+    if (totalSeconds > 0) {
+      int fillW = (int)(barW * ((float)elapsedSeconds / (float)totalSeconds));
+      if (fillW != _pbLastBarFillW) {
+        _pbLastBarFillW = fillW;
+        // Erase the bar's track first so a fill that shrinks (seek/replay)
+        // doesn't leave old fill pixels past the new, shorter edge.
+        M5.Lcd.fillRoundRect(barX, barY, barW, barH, 5, M5.Lcd.color565(42, 46, 55));
+        M5.Lcd.fillRoundRect(barX, barY, fillW, barH, 5, _good);
+      }
+    }
   }
 
   // Status/error screen: icon + headline convey severity before any text is
   // read. body is one or more paragraphs (separate strings), each
   // word-wrapped at the fixed kScaleBody size (never shrunk) - callers pass
   // full sentences rather than pre-breaking lines by hand.
-  void showStatus(Severity sev, const String &headline, const std::vector<String> &body, const String &footerPrimary = "") {
+  void showStatus(Severity sev, const String &headline, const std::vector<String> &body,
+                   const String &footerPrimary = "", bool footerPrimaryIsNav = false) {
     M5.Lcd.fillScreen(_bg);
 
     drawIcon(sev, _w / 2, 38, -1, 16);
-    centerText(headline, 66, _text, kScaleLabel);
-
-    int y = 100, bottom = reserveFooter();
+    int y = 66, bottom = reserveFooter();
+    for (auto &line : wrapAtScale(headline, kScaleLabel, _w - 16)) {
+      centerText(line, y, _text, kScaleLabel);
+      y += 18;
+    }
+    y += 16;
     for (auto &para : body) {
       if (y > bottom - 12) break;
       if (para.length() == 0) { y += 8; continue; }
@@ -282,7 +352,7 @@ class UiDisplay {
       y += 6;  // paragraph gap
     }
 
-    if (footerPrimary.length()) drawFooter(footerPrimary);
+    if (footerPrimary.length()) drawFooter(footerPrimary, footerPrimaryIsNav);
   }
 
   // Kept for the few genuinely neutral one-off messages that don't need
@@ -333,11 +403,41 @@ class UiDisplay {
   static const size_t kMaxBootLines = 6;
   std::vector<std::pair<String, Severity>> _bootLines;
   int _bootLogTop = 118;
+  String _recLastTimerBuf;  // last-drawn recording timer text; see showRecording()
+  String _pbLastTimerBuf;   // last-drawn playback elapsed/total text; see showPlayback()
+  int _pbLastBarFillW = -1; // last-drawn playback scrub bar fill width; see showPlayback()
+  String _upLastCountBuf;   // last-drawn "N of M files" text; see showUploading()
+  int _upLastBarFillW = -1; // last-drawn upload progress bar fill width; see showUploading()
 
-  // Strips the leading "/" and ".wav" so filenames read cleanly.
+  // Filenames are MEETING_YYYYMMDD_HHMMSS.wav (see NtpClock::
+  // filenameTimestamp()) - parses that into a "Aug 30 14:30" display string
+  // instead of showing the raw prefix/timestamp. Falls back to just
+  // stripping "/" and ".wav" for anything that doesn't match (e.g. the
+  // MEETING_UNKNOWN_TIME_<millis> name used when NTP wasn't synced).
   String shortName(const String &path) {
     String s = path.startsWith("/") ? path.substring(1) : path;
     if (s.endsWith(".wav")) s = s.substring(0, s.length() - 4);
+
+    static const char *kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    if (s.startsWith("MEETING_") && s.length() == 8 + 8 + 1 + 6 &&
+        s[16] == '_') {
+      String datePart = s.substring(8, 16);   // YYYYMMDD
+      String timePart = s.substring(17, 23);  // HHMMSS
+      bool allDigits = true;
+      for (size_t i = 0; i < datePart.length() && allDigits; i++) allDigits = isDigit(datePart[i]);
+      for (size_t i = 0; i < timePart.length() && allDigits; i++) allDigits = isDigit(timePart[i]);
+      if (allDigits) {
+        int month = datePart.substring(4, 6).toInt();
+        int day = datePart.substring(6, 8).toInt();
+        if (month >= 1 && month <= 12) {
+          char buf[16];
+          snprintf(buf, sizeof(buf), "%s %d %.2s:%.2s", kMonths[month - 1], day,
+                   timePart.c_str(), timePart.c_str() + 2);
+          return String(buf);
+        }
+      }
+    }
     return s;
   }
 
@@ -434,6 +534,7 @@ class UiDisplay {
     M5.Lcd.setFont(&fonts::Font0);
     M5.Lcd.setTextSize(scale);
     M5.Lcd.setTextColor(color, bg >= 0 ? (uint16_t)bg : _bg);
+    M5.Lcd.setTextWrap(false);  // clip long single-line text instead of wrapping into the row below
     M5.Lcd.setCursor(x, y);
     M5.Lcd.print(s);
   }
@@ -444,6 +545,7 @@ class UiDisplay {
     M5.Lcd.setTextSize(scale);
     int w = M5.Lcd.textWidth(s);
     M5.Lcd.setTextColor(color, bg >= 0 ? (uint16_t)bg : _bg);
+    M5.Lcd.setTextWrap(false);  // clip long single-line text instead of wrapping into the row below
     M5.Lcd.setCursor((_w - w) / 2, y);
     M5.Lcd.print(s);
   }
@@ -482,15 +584,58 @@ class UiDisplay {
     return lines;
   }
 
-  void drawFooter(const String &primary, const String &secondary = "") {
+  // Footer hints point back at the physical button that triggers them: G12
+  // (nav) sits to the right of the screen, so its hint is a right-pointing
+  // triangle glued to the right edge; G11 (select) is a top button pressed
+  // downward, so its hint is a down-pointing triangle centered on the
+  // screen. Each triangle sits immediately before its own label so the
+  // glyph and text read as one unit.
+  void drawNavHint(const String &label, int y) {
+    M5.Lcd.setFont(&fonts::Font0);
+    M5.Lcd.setTextSize(kScaleBody);
+    int textW = M5.Lcd.textWidth(label);
+    const int kTriSize = 6;
+    const int kGap = 4;
+    int rightEdge = _w - 8;
+    int textX = rightEdge - textW;
+    int triX = textX - kGap - kTriSize;
+    int cy = y + 4;  // vertically center on the text's cap height
+    M5.Lcd.fillTriangle(triX, cy - kTriSize, triX, cy + kTriSize, triX + kTriSize, cy, _muted);
+    leftText(label, textX, y, _muted, kScaleBody);
+  }
+
+  void drawSelectHint(const String &label, int y) {
+    M5.Lcd.setFont(&fonts::Font0);
+    M5.Lcd.setTextSize(kScaleBody);
+    int textW = M5.Lcd.textWidth(label);
+    const int kTriSize = 6;
+    const int kGap = 4;
+    int unitW = kTriSize * 2 + kGap + textW;
+    int triCx = (_w - unitW) / 2 + kTriSize;
+    int textX = triCx + kTriSize + kGap;
+    int cy = y + 4;
+    M5.Lcd.fillTriangle(triCx - kTriSize, cy - kTriSize, triCx + kTriSize, cy - kTriSize, triCx, cy + kTriSize, _muted);
+    leftText(label, textX, y, _muted, kScaleBody);
+  }
+
+  // primaryIsNav/secondaryIsNav pick which hint style each line uses -
+  // true for a G12/nav action (right-pointing triangle, right-aligned),
+  // false for a G11/select action (down-pointing triangle, centered).
+  void drawFooter(const String &primary, bool primaryIsNav, const String &secondary = "", bool secondaryIsNav = false) {
     M5.Lcd.drawFastHLine(0, footerTop(), _w, M5.Lcd.color565(34, 38, 46));
-    leftText(primary, 10, footerLine1(), _muted, kScaleBody);
-    if (secondary.length()) leftText(secondary, 10, footerLine2(), _muted, kScaleBody);
+    if (primary.length()) {
+      if (primaryIsNav) drawNavHint(primary, footerLine1());
+      else drawSelectHint(primary, footerLine1());
+    }
+    if (secondary.length()) {
+      if (secondaryIsNav) drawNavHint(secondary, footerLine2());
+      else drawSelectHint(secondary, footerLine2());
+    }
   }
 
   // Returns the y coordinate above which content must stay clear of the
   // footer - callers use this instead of hardcoding a break point so
-  // variable-length content (menus, lists) never overlaps "PRESS/HOLD".
+  // variable-length content (menus, lists) never overlaps the footer hints.
   int reserveFooter() { return footerTop() - 6; }
 
   // Brand mark: a small assistant/robot head (antenna, rounded face,
@@ -565,6 +710,9 @@ class UiDisplay {
     for (int i = 0; i < barCount && x < _w - 8; i++) {
       int barH = (int)((levels[i] / 255.0) * height);
       if (barH < 1) barH = 1;
+      // Erase the bar's full-height column first so a shrinking bar (vs.
+      // last frame) doesn't leave old pixels above/below the new, shorter one.
+      M5.Lcd.fillRect(x, top, barW, height, _bg);
       M5.Lcd.fillRect(x, midY - barH / 2, barW, barH, _accent);
       x += barW + gap;
     }

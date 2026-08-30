@@ -27,3 +27,11 @@ Before trusting the full pipeline, verify each piece independently:
 3. Short-press the button, watch the LCD switch to the recording screen with a moving waveform, short-press again, then pull the SD card and check a `MEETING_*.wav` file exists and plays. If the waveform never moves, the mic path (not the SD/button/LCD path) is the thing to debug next.
 4. Long-press from idle to confirm the menu opens and cycles through Upload now / WiFi info / Storage / About / Exit.
 5. Only after 1-4 work, worry about WiFi upload.
+
+## UI
+
+`src/ui_display.h` is laid out for the StickS3's 135x240 panel: fixed text scales, glyph-based menu icons, text wrapping, and a footer area kept clear of dynamic content. Boot progress is shown via `ui.bootLog(...)` calls during `setup()`.
+
+## Sound feedback
+
+`src/sounds.h` plays short tones through `M5.Speaker` for key events - `Sounds::init()` after `M5.begin()` (also raises master volume, since StickS3 defaults to a much lower speaker level than other M5 boards), `Sounds::startup()` once boot finishes, then `recordStart()` / `recordEnd()` / `error()` / `uploadComplete()` at the matching points in `main.cpp`. No SD card wired in yet - `Sounds::error()` plus an on-screen prompt is the expected result of a recording attempt until the SD adapter is connected.

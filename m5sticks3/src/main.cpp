@@ -1,15 +1,16 @@
 // AI Meeting Buddy - firmware for M5 StickS3
 //
-// Flow: idle screen -> press button -> record to SD as WAV, with a live
-// waveform on the LCD -> press again -> stop, finalize file -> hold the
-// button from idle to open a menu (playback / upload now / wifi info /
-// storage / about) navigated with short press (next item) and long press
-// (select). Pushbutton rotary encoder on pins 0/1/8 for additional
-// navigation.
+// Two dedicated buttons, no hold gesture: G11 selects/records, G12
+// navigates. Flow: idle screen -> press G11 -> record to SD as WAV, with a
+// live waveform on the LCD -> press again -> stop, finalize file -> press
+// G12 from idle to open a menu (playback / upload now / wifi info /
+// storage / about) navigated with G12 (next item) and G11 (select).
+// Pushbutton rotary encoder on pins 0/1/8 mirrors both (rotation = G12,
+// click = G11).
 //
-// Playback (from the menu): rotate the encoder to browse recordings, press
-// the main button to play the highlighted one, press again to pause/resume,
-// hold or shake the device (Y axis) to back out.
+// Playback (from the menu): rotate the encoder (or press G12) to browse
+// recordings, press G11 to play the highlighted one, press again to
+// pause/resume, shake the device (Y axis) to back out.
 //
 // Before this compiles/works on real hardware:
 //   1. Fill in config.h with your WiFi credentials (server URL already
@@ -35,14 +36,15 @@
 #include "rotary_encoder.h"
 #include "sounds.h"
 
-enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING };
+enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING, STORAGE_MENU };
 
 static State state = State::IDLE;
 
 static NtpClock clock_;
 static WavRecorder recorder;
 static UiDisplay ui;
-static RecordButton button;
+static RecordButton button(PIN_RECORD_BUTTON, RECORD_BUTTON_ACTIVE_LOW);
+static NavButton navButton(PIN_NAV_BUTTON, NAV_BUTTON_ACTIVE_LOW);
 static RotaryEncoder encoder;
 static WifiUploader uploader;
 static AudioVisualizer visualizer;
@@ -76,11 +78,13 @@ static unsigned long lastBatteryPollMs = 0;
 static int cachedBatteryPct = 100;
 static unsigned long lastUploadAttemptMs = 0;
 static uint32_t lastRecordingSeconds = 0;
+// Set on entry into RECORDING so showRecording() draws its static chrome
+// once instead of every ~120ms redraw - see the RECORDING case in loop().
+static bool firstRecordingDraw = true;
 
 static std::vector<MenuItem> kMenuItems = {
   {"Playback", Glyph::kPlay},
   {"Upload now", Glyph::kUpload},
-  {"WiFi info", Glyph::kWifi},
   {"Storage", Glyph::kDisk},  // flips to a critical glyph in refreshMenuIcons() when SD is missing
   {"About", Glyph::kInfo},
   {"Power off", Glyph::kPower},
@@ -88,6 +92,21 @@ static std::vector<MenuItem> kMenuItems = {
 };
 static int menuSelectedIndex = 0;
 static unsigned long menuLastActivityMs = 0;
+
+// Storage submenu: "Clear recordings" is destructive, so it always sits
+// above a dedicated "Back" item (never combined with the parent menu's own
+// back/exit path) so backing out of Storage can't double as an accidental
+// tap on "clear everything".
+static std::vector<MenuItem> kStorageMenuItems = {
+  {"Storage info", Glyph::kDisk},
+  {"Clear recordings", Glyph::kCrit},
+  {"Back", Glyph::kExit},
+};
+static int storageMenuSelectedIndex = 0;
+// True when the current INFO screen (or the "Storage cleared" result screen)
+// was entered from the Storage submenu, so backing out returns there instead
+// of the main menu.
+static bool infoReturnsToStorage = false;
 
 // Storage's menu glyph reflects live SD status (disk icon when mounted,
 // critical X when missing/failed) rather than a static icon.
@@ -137,11 +156,17 @@ bool hasPendingUploads() {
 }
 
 void startRecording() {
+  // SD init at boot can fail if the card wasn't seated yet; retry here so
+  // inserting a card and pressing record recovers without a reboot.
+  if (!sdOk) {
+    sdOk = recorder.beginSd();
+    refreshMenuIcons();
+  }
   if (!sdOk) {
     Sounds::error();
     ui.showStatus(Severity::kCrit, "No SD card",
                   {"Recordings can't be saved.", "", "Insert a card, then press to retry."},
-                  "PRESS  retry");
+                  "retry", false);
     delay(1500);
     forceIdleRedraw = true;
     return;
@@ -151,7 +176,7 @@ void startRecording() {
     Sounds::error();
     ui.showStatus(Severity::kCrit, "Save failed",
                   {"Recording stopped. Last few seconds may be lost.", "", "Check SD space, then retry."},
-                  "PRESS  retry");
+                  "retry", false);
     delay(1500);
     forceIdleRedraw = true;
     return;
@@ -159,13 +184,29 @@ void startRecording() {
   visualizer.reset();
   recordingStartMs = millis();
   state = State::RECORDING;
+  firstRecordingDraw = true;
   Sounds::recordStart();
 }
 
 void stopRecording() {
-  lastRecordingSeconds = (millis() - recordingStartMs) / 1000;
+  uint32_t elapsed = (millis() - recordingStartMs) / 1000;
   recorder.close();
+  if (elapsed < MIN_RECORDING_SECONDS) {
+    recorder.discardLast();  // too short to be a real recording - drop it
+  } else {
+    lastRecordingSeconds = elapsed;
+  }
   M5.Mic.end();  // release I2S/codec between recordings to save power
+  // Mic and Speaker share one ES8311 codec chip; M5.Mic.end() powers the
+  // whole codec down via its own enable callback, but M5Unified's
+  // Speaker_Class::begin() only re-runs *its* codec-enable sequence the
+  // very first time it's called (it no-ops if already "begun"). Without
+  // this, the speaker's _begun flag stays true forever after the first
+  // tone played at boot, so nothing re-powers the codec's DAC/output path
+  // after a recording - every tone() and WAV playback after that goes
+  // silent. Ending the speaker here forces it to properly re-begin (and
+  // re-enable the codec) on its next use.
+  M5.Speaker.end();
   Sounds::recordEnd();
   goIdle();
 }
@@ -192,25 +233,72 @@ void tryUpload() {
   if (pending.empty()) return;
 
   state = State::UPLOADING;
-  ui.showUploading(0, (int)pending.size());
+  // The panel controller ignores/garbles writes while asleep (see the wake
+  // handling in loop()), so don't draw at all while screenOn is false - the
+  // upload still runs to completion in the background either way, and if
+  // nothing was drawn there's no result screen to leave up afterward either
+  // (see the screenOn check at the end of this function).
+  bool uiDrawnThisUpload = false;
+  if (screenOn) {
+    ui.showUploading(0, (int)pending.size(), true);
+    uiDrawnThisUpload = true;
+  }
 
   if (!uploader.connect()) {
     Sounds::error();
-    ui.showStatus(Severity::kWarn, "Wi-Fi offline",
-                  {"Recording still saves to SD.", "", "Uploads once Wi-Fi reconnects."},
-                  "PRESS  ok");
-    delay(1500);
+    if (screenOn) {
+      ui.showStatus(Severity::kWarn, "Wi-Fi offline",
+                    {"Recording still saves to SD.", "", "Uploads once Wi-Fi reconnects."},
+                    "ok", false);
+      delay(1500);
+    }
     goIdle();
     return;
   }
 
-  uploader.uploadAllPending(pending, [](int done, int total) {
-    ui.showUploading(done, total);
-  });
+  int chunkProgressDoneCount = 0;
+  uploader.uploadAllPending(
+      pending,
+      [&chunkProgressDoneCount, &uiDrawnThisUpload, &pending](int done, int total) {
+        chunkProgressDoneCount = done;
+        if (!screenOn) return;
+        ui.showUploading(done, total, !uiDrawnThisUpload);
+        uiDrawnThisUpload = true;
+      },
+      [&pending, &chunkProgressDoneCount, &uiDrawnThisUpload](size_t sentBytes, size_t fileSize) {
+        if (!screenOn) return;
+        // Uses the last-completed-file count so the bar's file-count text
+        // stays correct while its fill advances mid-file.
+        float fraction = fileSize > 0 ? (float)sentBytes / (float)fileSize : 0.0f;
+        ui.showUploading(chunkProgressDoneCount, (int)pending.size(), !uiDrawnThisUpload, fraction);
+        uiDrawnThisUpload = true;
+      });
 
   uploader.disconnect();
   Sounds::uploadComplete();
-  goIdle();
+
+  // If the screen is off, there's no one to show the result to - go
+  // straight back to idle instead of leaving a result screen up that would
+  // otherwise show stale/blank GRAM the next time the display wakes (see
+  // the wake handling in loop(), which only knows how to repaint IDLE and
+  // RECORDING). Idle's own Wi-Fi/SD status rows already reflect the outcome.
+  if (!screenOn) {
+    goIdle();
+    return;
+  }
+
+  // Stay on a result screen instead of dropping straight back to idle -
+  // the state machine's own fillScreen()-on-entry (goIdle()'s
+  // forceIdleRedraw) already keeps the eventual idle redraw clean; this is
+  // about giving the user a moment to see the upload actually finished
+  // before it disappears, and something to acknowledge (G11 back) rather
+  // than auto-dismissing.
+  int uploadedCount = (int)pending.size();
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%d file%s uploaded", uploadedCount, uploadedCount == 1 ? "" : "s");
+  ui.showStatus(Severity::kGood, "Upload complete", {buf}, "back", false);
+  state = State::UPLOADING;
+  menuLastActivityMs = millis();
 }
 
 void enterPlaybackList() {
@@ -227,14 +315,14 @@ void startPlayback() {
     Sounds::error();
     ui.showStatus(Severity::kCrit, "Can't play file",
                   {"May be corrupted or still uploading.", "", "Try another recording."},
-                  "HOLD  back");
+                  "back", false);
     delay(1000);
     ui.showRecordingList(playbackList, playbackSelectedIndex);
     return;
   }
   playbackLastActivityMs = millis();
   state = State::PLAYING;
-  ui.showPlayback(player.path(), 0, player.totalSeconds(), false);
+  ui.showPlayback(player.path(), 0, player.totalSeconds(), false, true);
 }
 
 void enterMenu() {
@@ -243,17 +331,6 @@ void enterMenu() {
   state = State::MENU;
   refreshMenuIcons();
   ui.showMenu(kMenuItems, menuSelectedIndex);
-}
-
-void showWifiInfoScreen() {
-  std::vector<String> lines;
-  lines.push_back(String("SSID: ") + WIFI_SSID);
-  lines.push_back(WiFi.status() == WL_CONNECTED
-                       ? ("IP: " + WiFi.localIP().toString())
-                       : String("Not connected"));
-  lines.push_back("");
-  lines.push_back("Wi-Fi only powers on to upload recordings.");
-  ui.showInfo("WIFI", lines, Glyph::kWifi);
 }
 
 void showStorageInfoScreen() {
@@ -272,6 +349,33 @@ void showStorageInfoScreen() {
     lines.push_back(buf);
   }
   ui.showInfo("STORAGE", lines, sdOk ? Glyph::kDisk : Glyph::kCrit);
+}
+
+void enterStorageMenu() {
+  // SD init at boot can fail if the card wasn't seated yet; retry here so
+  // opening Storage after inserting a card recovers without a reboot.
+  if (!sdOk) {
+    sdOk = recorder.beginSd();
+    refreshMenuIcons();
+  }
+  storageMenuSelectedIndex = 0;
+  menuLastActivityMs = millis();
+  state = State::STORAGE_MENU;
+  ui.showMenu(kStorageMenuItems, storageMenuSelectedIndex);
+}
+
+// Deletes every recording on the card. Reachable only via the Storage
+// submenu's dedicated "Clear recordings" item, with "Back" as a separate,
+// harmless item below it - see kStorageMenuItems.
+void clearAllRecordings() {
+  int count = WavRecorder::deleteAllRecordings();
+  Sounds::recordEnd();
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d recording(s) deleted", count);
+  ui.showStatus(Severity::kGood, "Storage cleared", {buf}, "back", false);
+  state = State::INFO;
+  infoReturnsToStorage = true;
+  menuLastActivityMs = millis();
 }
 
 void showAboutScreen() {
@@ -303,6 +407,10 @@ void runSelectedMenuItem() {
     goIdle();
     return;
   }
+  if (label == "Storage") {
+    enterStorageMenu();
+    return;
+  }
   if (label == "Power off") {
     ui.showMessage("Powering off", {"See you next", "meeting."});
     delay(500);
@@ -314,9 +422,25 @@ void runSelectedMenuItem() {
   // to the menu. Handled as a lightweight sub-loop so main.cpp's top-level
   // loop() doesn't need a state per info screen.
   state = State::INFO;
-  if (label == "WiFi info") showWifiInfoScreen();
-  else if (label == "Storage") showStorageInfoScreen();
-  else if (label == "About") showAboutScreen();
+  infoReturnsToStorage = false;
+  if (label == "About") showAboutScreen();
+}
+
+// Executes the currently-selected item in the Storage submenu.
+void runSelectedStorageMenuItem() {
+  String label = kStorageMenuItems[storageMenuSelectedIndex].label;
+  if (label == "Storage info") {
+    state = State::INFO;
+    infoReturnsToStorage = true;
+    showStorageInfoScreen();
+    return;
+  }
+  if (label == "Clear recordings") {
+    clearAllRecordings();
+    return;
+  }
+  // "Back"
+  enterMenu();
 }
 
 void setup() {
@@ -336,6 +460,7 @@ void setup() {
   if (!sdOk) Serial.println("SD init failed - check wiring/pins.h");
 
   button.begin();
+  navButton.begin();
   encoder.begin();
   ui.bootLog("Controls ready", Severity::kGood);
 
@@ -359,44 +484,44 @@ void setup() {
 
 void loop() {
   M5.update();
-  ButtonEvent ev = button.poll();
+  // Two dedicated buttons, no hold gesture: G11 selects/records, G12
+  // navigates. The rotary encoder mirrors both - rotation is the same as a
+  // G12 press (with direction for menuStepBack), its own click is the same
+  // as a G11 press.
+  bool select = (button.poll() == ButtonEvent::PRESSED);
+  bool nav = (navButton.poll() == ButtonEvent::PRESSED);
   bool menuStepBack = false;
-  bool fromEncoderRotation = false;
-  if (ev == ButtonEvent::NONE) {
-    // Rotary encoder mirrors the physical button: right = short press (next
-    // item), left = same but backward through the menu, click = long press
-    // (select). In the playback list this rotation is instead used purely
-    // for navigation (see State::PLAYBACK_LIST) so the main button's short
-    // press is free to mean "play" there.
-    switch (encoder.poll()) {
-      case EncoderEvent::RIGHT:
-        ev = ButtonEvent::SHORT;
-        fromEncoderRotation = true;
-        break;
-      case EncoderEvent::LEFT:
-        ev = ButtonEvent::SHORT;
-        menuStepBack = true;
-        fromEncoderRotation = true;
-        break;
-      case EncoderEvent::BUTTON:
-        ev = ButtonEvent::LONG;
-        break;
-      case EncoderEvent::NONE:
-        break;
-    }
+  switch (encoder.poll()) {
+    case EncoderEvent::RIGHT:
+      nav = true;
+      break;
+    case EncoderEvent::LEFT:
+      nav = true;
+      menuStepBack = true;
+      break;
+    case EncoderEvent::BUTTON:
+      select = true;
+      break;
+    case EncoderEvent::NONE:
+      break;
   }
 
   // Shake-to-go-back: a hard flick on the Y axis backs out one level, same
-  // as a long-press, from any screen except IDLE/RECORDING (where a shake
+  // as it always has, from any screen except IDLE/RECORDING (where a shake
   // is more likely to be incidental handling, not a deliberate gesture).
   bool shakeBack = detectShake();
 
   // Backlight power save: any real input wakes the screen and resets the
-  // inactivity timer. In IDLE/RECORDING (the states this applies to - see
-  // below) the input that woke the screen is consumed here and does NOT
-  // also perform its normal action, so a pocket bump can't start/stop a
-  // recording or open the menu - it takes a second, deliberate input.
-  bool hadInput = (ev != ButtonEvent::NONE) || shakeBack;
+  // inactivity timer. In IDLE the input that woke the screen is consumed
+  // here and does NOT also perform its normal action, so a pocket bump
+  // can't start a recording or open the menu - it takes a second,
+  // deliberate input. RECORDING is the exception: the button press is left
+  // to fall through and stop the recording immediately, since requiring a
+  // second press to stop would mean the mic silently keeps recording after
+  // the user believes they've stopped it. A waking shake in RECORDING is
+  // still swallowed, same as before, since it's more likely incidental
+  // handling than a deliberate gesture.
+  bool hadInput = select || nav || shakeBack;
   bool woke = false;
   if (hadInput) {
     lastActivityMs = millis();
@@ -405,6 +530,11 @@ void loop() {
       M5.Lcd.wakeup();
       woke = true;
       lastIdleRedrawMs = 0;  // force an immediate redraw instead of waiting out the 1s throttle
+      // sleep()/wakeup() leaves stale GRAM content, so whichever blankable
+      // screen we wake back into must fully repaint its chrome, not just its
+      // normal partial/incremental update.
+      forceIdleRedraw = true;
+      firstRecordingDraw = true;
     }
   }
   bool blankableState = (state == State::IDLE || state == State::RECORDING);
@@ -412,8 +542,12 @@ void loop() {
     screenOn = false;
     M5.Lcd.sleep();
   }
-  if (woke && blankableState) {
-    ev = ButtonEvent::NONE;
+  if (woke && state == State::IDLE) {
+    select = false;
+    nav = false;
+    shakeBack = false;
+  }
+  if (woke && state == State::RECORDING) {
     shakeBack = false;
   }
 
@@ -428,12 +562,16 @@ void loop() {
 
   switch (state) {
     case State::IDLE: {
-      if (ev == ButtonEvent::SHORT) {
-        startRecording();
+      // G12 (or encoder rotation) opens the menu - "next item" only makes
+      // sense once there's a list/menu on screen, and it's the dedicated
+      // navigation input. G11 (or the encoder's own click) starts a
+      // recording, its only job on this screen.
+      if (nav) {
+        enterMenu();
         break;
       }
-      if (ev == ButtonEvent::LONG) {
-        enterMenu();
+      if (select) {
+        startRecording();
         break;
       }
       if (screenOn && (justEnteredIdle || millis() - lastIdleRedrawMs > 1000)) {
@@ -474,31 +612,43 @@ void loop() {
 
     case State::RECORDING: {
       pumpAudioToSd();
-      if (ev == ButtonEvent::SHORT || ev == ButtonEvent::LONG) {
+      if (select || nav) {
         stopRecording();
         break;
       }
       static unsigned long lastRedraw = 0;
       if (screenOn && millis() - lastRedraw > 120) {  // fast enough for the waveform to feel live
         lastRedraw = millis();
-        ui.showRecording((millis() - recordingStartMs) / 1000, visualizer);
+        ui.showRecording((millis() - recordingStartMs) / 1000, visualizer, firstRecordingDraw);
+        firstRecordingDraw = false;
       }
       break;
     }
 
-    case State::UPLOADING:
-      // handled synchronously inside tryUpload(); nothing to do here
+    case State::UPLOADING: {
+      // tryUpload() runs synchronously and leaves the "Upload complete"
+      // result screen showing when it returns; from here it's just a
+      // dismissible status screen like INFO, waiting for G11 (or a timeout
+      // if the user walks away) before returning to idle.
+      if (select) {
+        goIdle();
+      } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
+        goIdle();
+      }
       break;
+    }
 
     case State::MENU: {
-      if (ev == ButtonEvent::SHORT) {
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
         int count = (int)kMenuItems.size();
         menuSelectedIndex = menuStepBack
                                 ? (menuSelectedIndex + count - 1) % count
                                 : (menuSelectedIndex + 1) % count;
         menuLastActivityMs = millis();
         ui.showMenu(kMenuItems, menuSelectedIndex);
-      } else if (ev == ButtonEvent::LONG) {
+      } else if (select) {
+        // G11 (or encoder click): select the highlighted item.
         menuLastActivityMs = millis();
         runSelectedMenuItem();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
@@ -508,10 +658,33 @@ void loop() {
     }
 
     case State::INFO: {
-      // A long-press from an info screen goes back to the menu; anything
-      // else (or a timeout) also bails out to keep the UI from ever feeling
-      // stuck on one screen.
-      if (ev == ButtonEvent::LONG || ev == ButtonEvent::SHORT) {
+      // G11 from an info screen goes back to whichever menu it was opened
+      // from (main menu, or the Storage submenu); anything else (or a
+      // timeout) also bails out to keep the UI from ever feeling stuck on
+      // one screen.
+      if (select || nav) {
+        if (infoReturnsToStorage) enterStorageMenu();
+        else enterMenu();
+      } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
+        goIdle();
+      }
+      break;
+    }
+
+    case State::STORAGE_MENU: {
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
+        int count = (int)kStorageMenuItems.size();
+        storageMenuSelectedIndex = menuStepBack
+                                        ? (storageMenuSelectedIndex + count - 1) % count
+                                        : (storageMenuSelectedIndex + 1) % count;
+        menuLastActivityMs = millis();
+        ui.showMenu(kStorageMenuItems, storageMenuSelectedIndex);
+      } else if (select) {
+        // G11 (or encoder click): select the highlighted item.
+        menuLastActivityMs = millis();
+        runSelectedStorageMenuItem();
+      } else if (shakeBack) {
         enterMenu();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();
@@ -520,8 +693,8 @@ void loop() {
     }
 
     case State::PLAYBACK_LIST: {
-      if (ev == ButtonEvent::SHORT && fromEncoderRotation) {
-        // Encoder rotation: move the highlight only.
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
         if (!playbackList.empty()) {
           int count = (int)playbackList.size();
           playbackSelectedIndex = menuStepBack
@@ -530,11 +703,11 @@ void loop() {
         }
         playbackLastActivityMs = millis();
         ui.showRecordingList(playbackList, playbackSelectedIndex);
-      } else if (ev == ButtonEvent::SHORT) {
-        // Main button click: play the highlighted item.
+      } else if (select) {
+        // G11 (or encoder click): play the highlighted item.
         playbackLastActivityMs = millis();
         startPlayback();
-      } else if (ev == ButtonEvent::LONG || shakeBack) {
+      } else if (shakeBack) {
         enterMenu();
       } else if (millis() - playbackLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();
@@ -543,15 +716,15 @@ void loop() {
     }
 
     case State::PLAYING: {
-      if (ev == ButtonEvent::SHORT) {
+      if (select) {
         // click = pause, click again = resume
         if (player.isPaused()) player.resume();
         else player.pause();
         playbackLastActivityMs = millis();
-        ui.showPlayback(player.path(), player.elapsedSeconds(), player.totalSeconds(), player.isPaused());
+        ui.showPlayback(player.path(), player.elapsedSeconds(), player.totalSeconds(), player.isPaused(), true);
         break;
       }
-      if (ev == ButtonEvent::LONG || shakeBack) {
+      if (shakeBack) {
         player.close();
         enterPlaybackList();
         break;
@@ -565,7 +738,7 @@ void loop() {
       static unsigned long lastRedraw = 0;
       if (millis() - lastRedraw > 200) {
         lastRedraw = millis();
-        ui.showPlayback(player.path(), player.elapsedSeconds(), player.totalSeconds(), player.isPaused());
+        ui.showPlayback(player.path(), player.elapsedSeconds(), player.totalSeconds(), player.isPaused(), false);
       }
       break;
     }

@@ -28,4 +28,4 @@
 
 // ---- Menu ---------------------------------------------------------------
 #define MENU_IDLE_TIMEOUT_MS  (8UL * 1000UL)   // auto-return to idle if the menu sits untouched this long
-#define DEVICE_VERSION  "0.2"
+#define DEVICE_VERSION  "0.3"

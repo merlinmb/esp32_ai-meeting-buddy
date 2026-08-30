@@ -34,6 +34,10 @@ class WavRecorder {
   bool beginSd() {
     SPI.begin(PIN_SD_SCLK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     if (!SD.begin(PIN_SD_CS)) {
+      Serial.println("SD.begin failed (CS=" + String(PIN_SD_CS) +
+                      ", SCLK=" + String(PIN_SD_SCLK) +
+                      ", MOSI=" + String(PIN_SD_MOSI) +
+                      ", MISO=" + String(PIN_SD_MISO) + ")");
       return false;
     }
     return true;
@@ -74,7 +78,14 @@ class WavRecorder {
   String lastPath() const { return _path; }
   uint32_t bytesWritten() const { return _bytesWritten; }
 
-  // Lists .wav files on the card that don't yet have a matching ".done" marker.
+  // Deletes the last file written by close() - used to discard recordings
+  // too short to be useful.
+  void discardLast() {
+    if (_path.length()) SD.remove(_path);
+  }
+
+  // Lists .wav files in the root directory - files already uploaded live
+  // under /uploaded (see WifiUploader::moveToUploaded) so they never appear here.
   static std::vector<String> pendingFiles() {
     std::vector<String> out;
     File root = SD.open("/");
@@ -83,20 +94,32 @@ class WavRecorder {
     while (f) {
       String name = f.name();
       if (name.endsWith(".wav")) {
-        String donePath = name.substring(0, name.length() - 4) + ".done";
-        if (!SD.exists("/" + donePath) && !SD.exists(donePath)) {
-          out.push_back(name.startsWith("/") ? name : "/" + name);
-        }
+        out.push_back(name.startsWith("/") ? name : "/" + name);
       }
       f = root.openNextFile();
     }
     return out;
   }
 
-  static void markUploaded(const String &wavPath) {
-    String donePath = wavPath.substring(0, wavPath.length() - 4) + ".done";
-    File f = SD.open(donePath, FILE_WRITE);
-    if (f) f.close();
+  // Deletes every .wav recording in the root directory. Returns the count of
+  // .wav files removed.
+  static int deleteAllRecordings() {
+    int count = 0;
+    File root = SD.open("/");
+    if (!root) return count;
+    File f = root.openNextFile();
+    while (f) {
+      String name = f.name();
+      bool isDir = f.isDirectory();
+      f.close();
+      if (!isDir && name.endsWith(".wav")) {
+        String path = name.startsWith("/") ? name : "/" + name;
+        SD.remove(path);
+        count++;
+      }
+      f = root.openNextFile();
+    }
+    return count;
   }
 
  private:

@@ -29,6 +29,13 @@
 #define PIN_RECORD_BUTTON  11  // KEY1 on M5StickS3
 #define RECORD_BUTTON_ACTIVE_LOW  true
 
+// Second onboard button, wired to G12 - dedicated navigation input (advances
+// through menus/lists, same as rotating the encoder right, and opens the
+// menu from idle). KEY1/G11 is the select/record input: starts/stops a
+// recording from idle, selects the highlighted item everywhere else.
+#define PIN_NAV_BUTTON  12
+#define NAV_BUTTON_ACTIVE_LOW  true
+
 // Pushbutton rotary encoder
 #define ENCODER_SW   0   // Switch/Button
 #define ENCODER_CLK  1   // Clock

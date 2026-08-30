@@ -90,13 +90,23 @@ class RotaryEncoder {
     // Button press (active-low), time-based debounce.
     bool raw = (digitalRead(ENCODER_SW) == LOW);
     unsigned long now = millis();
+    bool buttonPressed = false;
     if (raw != _rawActive) {
       _rawActive = raw;
       _lastEdgeMs = now;
     } else if ((now - _lastEdgeMs) >= kDebounceMs && raw != _stableActive) {
       _stableActive = raw;
-      if (_stableActive) return EncoderEvent::BUTTON;  // fires on press
+      buttonPressed = _stableActive;  // fires on press
     }
+
+    // A button press takes priority for this call's return value (an
+    // EncoderEvent can only report one thing), but the half-steps are left
+    // untouched in that case rather than drained - so a rotation that lands
+    // in the same poll() as a button press isn't silently lost, it's just
+    // reported on the very next call instead. Previously this whole block
+    // was skipped (via an early return) on a button press, which is what
+    // dropped it.
+    if (buttonPressed) return EncoderEvent::BUTTON;
 
     // Rotation: Buxton's table counts 2 half-steps per mechanical detent
     // (see kStateTable comment), so a full click needs |pending| >= 2.
@@ -116,7 +126,7 @@ class RotaryEncoder {
   }
 
  private:
-  static const unsigned long kDebounceMs = 10;
+  static const unsigned long kDebounceMs = 3;
 
   bool _rawActive = false;
   bool _stableActive = false;
