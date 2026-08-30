@@ -33,6 +33,7 @@
 #include "wifi_uploader.h"
 #include "audio_visualizer.h"
 #include "rotary_encoder.h"
+#include "sounds.h"
 
 enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING };
 
@@ -137,6 +138,7 @@ bool hasPendingUploads() {
 
 void startRecording() {
   if (!sdOk) {
+    Sounds::error();
     ui.showStatus(Severity::kCrit, "No SD card",
                   {"Recordings can't be saved.", "", "Insert a card, then press to retry."},
                   "PRESS  retry");
@@ -146,6 +148,7 @@ void startRecording() {
   }
   String base = clock_.filenameTimestamp();
   if (!recorder.startNewFile(base)) {
+    Sounds::error();
     ui.showStatus(Severity::kCrit, "Save failed",
                   {"Recording stopped. Last few seconds may be lost.", "", "Check SD space, then retry."},
                   "PRESS  retry");
@@ -156,12 +159,14 @@ void startRecording() {
   visualizer.reset();
   recordingStartMs = millis();
   state = State::RECORDING;
+  Sounds::recordStart();
 }
 
 void stopRecording() {
   lastRecordingSeconds = (millis() - recordingStartMs) / 1000;
   recorder.close();
   M5.Mic.end();  // release I2S/codec between recordings to save power
+  Sounds::recordEnd();
   goIdle();
 }
 
@@ -190,6 +195,7 @@ void tryUpload() {
   ui.showUploading(0, (int)pending.size());
 
   if (!uploader.connect()) {
+    Sounds::error();
     ui.showStatus(Severity::kWarn, "Wi-Fi offline",
                   {"Recording still saves to SD.", "", "Uploads once Wi-Fi reconnects."},
                   "PRESS  ok");
@@ -203,6 +209,7 @@ void tryUpload() {
   });
 
   uploader.disconnect();
+  Sounds::uploadComplete();
   goIdle();
 }
 
@@ -217,6 +224,7 @@ void enterPlaybackList() {
 void startPlayback() {
   if (playbackList.empty()) return;
   if (!player.open(playbackList[playbackSelectedIndex])) {
+    Sounds::error();
     ui.showStatus(Severity::kCrit, "Can't play file",
                   {"May be corrupted or still uploading.", "", "Try another recording."},
                   "HOLD  back");
@@ -316,6 +324,7 @@ void setup() {
 
   auto cfg = M5.config();
   M5.begin(cfg);
+  Sounds::init();
 
   bool lcdOk = ui.begin();
   ui.beginBootLog(DEVICE_VERSION);
@@ -343,6 +352,7 @@ void setup() {
   }
 
   ui.bootLog("Ready", Severity::kGood);
+  Sounds::startup();
   delay(800);
   lastActivityMs = millis();
 }
