@@ -201,7 +201,7 @@ class WifiUploader {
       return false;
     }
     String dest = "/uploaded/" + baseName(wavPath);
-    SD.remove(dest);  // rename() fails if the destination already exists
+    if (SD.exists(dest)) SD.remove(dest);  // rename() fails if the destination already exists
     if (!SD.rename(wavPath, dest)) {
       Serial.println("moveToUploaded: rename failed for " + wavPath);
       return false;
@@ -255,6 +255,32 @@ class WifiUploader {
     }
   };
 
+  // Reads one line, blocking only up to whatever's left of deadlineMs -
+  // unlike Stream::readStringUntil(), which uses its own fixed internal
+  // timeout (Arduino default 1000ms via setTimeout()) regardless of
+  // deadlineMs. That mismatch was the actual bug behind most "resumable"
+  // uploads quietly corrupting: if the server took just over a second to
+  // flush the next header line (a slow/congested link, not a real failure),
+  // readStringUntil() gave up and returned "" - which the old code read as
+  // "blank line, end of headers", so it stopped parsing headers early,
+  // missed Content-Length, and misaligned every byte read after that on a
+  // reused keep-alive connection. Returns "" (with ok=false) only on a real
+  // deadline expiry or disconnect, never on an ordinary slow line.
+  static String readLineWithDeadline(WiFiClient &client, unsigned long deadlineMs, bool &ok) {
+    String line;
+    line.reserve(64);
+    for (;;) {
+      while (client.available()) {
+        char c = (char)client.read();
+        if (c == '\n') { ok = true; return line; }
+        if (c != '\r') line += c;
+      }
+      if (!client.connected() && !client.available()) { ok = false; return line; }
+      if (millis() >= deadlineMs) { ok = false; return line; }
+      delay(2);
+    }
+  }
+
   // Reads a "HTTP/1.1 <code> ..." status line, then headers (tracking
   // Content-Length and any explicit "Connection: close"), then exactly
   // Content-Length bytes of body - required for keep-alive, since without a
@@ -269,7 +295,9 @@ class WifiUploader {
     }
     if (!client.available()) return false;
 
-    String statusLine = client.readStringUntil('\n');
+    bool lineOk = false;
+    String statusLine = readLineWithDeadline(client, deadlineMs, lineOk);
+    if (!lineOk || !statusLine.startsWith("HTTP/")) return false;
     int sp1 = statusLine.indexOf(' ');
     int sp2 = sp1 >= 0 ? statusLine.indexOf(' ', sp1 + 1) : -1;
     if (sp1 < 0 || sp2 < 0) return false;
@@ -277,10 +305,10 @@ class WifiUploader {
 
     long contentLength = -1;
     keepAlive = true;
-    while (millis() < deadlineMs) {
-      if (!client.connected() && !client.available()) break;
-      String line = client.readStringUntil('\n');
-      if (line.length() == 0 || line == "\r") break;  // blank line = end of headers
+    for (;;) {
+      String line = readLineWithDeadline(client, deadlineMs, lineOk);
+      if (!lineOk) return false;  // real timeout/disconnect mid-headers - don't trust this connection's framing
+      if (line.length() == 0) break;  // blank line = end of headers
       String lower = line;
       lower.toLowerCase();
       if (lower.startsWith("content-length:")) {

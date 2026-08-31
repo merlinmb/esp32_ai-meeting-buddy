@@ -41,6 +41,7 @@
 #include "audio_visualizer.h"
 #include "rotary_encoder.h"
 #include "sounds.h"
+#include "web_server.h"
 
 enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING, STORAGE_MENU,
                     NETWORK_MENU, NETWORK_LIST, NETWORK_KEYBOARD };
@@ -57,6 +58,7 @@ static WifiUploader uploader;
 static WifiStore wifiStore;
 static AudioVisualizer visualizer;
 static WavPlayer player;
+static DeviceWebServer webServer;
 
 static bool sdOk = false;
 // Set whenever we transition into IDLE (see goIdle()) or show a full-screen
@@ -79,7 +81,7 @@ static unsigned long lastActivityMs = 0;
 static unsigned long recordingStartMs = 0;
 static unsigned long lastIdleRedrawMs = 0;
 static String lastIdleClockBuf;
-static bool lastIdleWifi = false;
+static int lastIdleWifiPct = -1;
 static bool lastIdleSdOk = false;
 static int lastIdleBatteryPct = -1;
 static unsigned long lastBatteryPollMs = 0;
@@ -122,7 +124,7 @@ static std::vector<MenuItem> kMenuItems = {
   {"Storage", Glyph::kDisk},  // flips to a critical glyph in refreshMenuIcons() when SD is missing
   {"About", Glyph::kInfo},
   {"Power off", Glyph::kPower},
-  {"Exit", Glyph::kExit},
+  {"Back", Glyph::kExit},
 };
 static int menuSelectedIndex = 0;
 static unsigned long menuLastActivityMs = 0;
@@ -148,8 +150,8 @@ static InfoReturnTo infoReturnTo = InfoReturnTo::kMainMenu;
 // network), so - same convention as kStorageMenuItems - it sits below the
 // other actions with "Back" last, never combined with a normal action.
 static std::vector<MenuItem> kNetworkMenuItems = {
-  {"WiFi", Glyph::kWifi},
-  {"Add new WiFi", Glyph::kWifi},
+  {"Connect", Glyph::kWifi},
+  {"Add new WiFi", Glyph::kPlus},
   {"Upload now", Glyph::kUpload},
   {"Disconnect", Glyph::kWifi},
   {"Clear WiFis", Glyph::kCrit},
@@ -212,6 +214,13 @@ int readBatteryPercent() {
   return constrain(level, 0, 100);
 }
 
+// Maps RSSI dBm (roughly -100 = unusable, -50 or better = excellent, the
+// standard range used by most signal-strength UIs) to a 0-100% figure for
+// the idle screen - simpler for an at-a-glance reading than a raw dBm value.
+int rssiToPercent(int32_t rssiDbm) {
+  return constrain(2 * (rssiDbm + 100), 0, 100);
+}
+
 // True while USB (VBUS) is present, via the M5PM1 PMIC's VBUS monitor
 // (getVBUSVoltage() returns -1 on boards without VBUS sensing).
 bool isUsbConnected() {
@@ -233,6 +242,20 @@ bool connectPreferredOrDefault() {
 
 bool hasPendingUploads() {
   return sdOk && !WavRecorder::pendingFiles().empty();
+}
+
+// Starts/stops the dashboard web server to track WiFi association - it's
+// meaningless (and holds a listening socket) while offline. Polled once per
+// loop() iteration rather than patched into every connect()/disconnect()
+// call site, since WifiUploader's upload flow also connects/disconnects WiFi
+// on its own schedule.
+void syncWebServerWithWifi() {
+  bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  if (wifiConnected && !webServer.isRunning()) {
+    webServer.begin();
+  } else if (!wifiConnected && webServer.isRunning()) {
+    webServer.end();
+  }
 }
 
 void startRecording() {
@@ -507,7 +530,7 @@ void runSelectedMenuItem() {
     enterNetworkMenu();
     return;
   }
-  if (label == "Exit") {
+  if (label == "Back") {
     goIdle();
     return;
   }
@@ -551,7 +574,7 @@ void runSelectedStorageMenuItem() {
 // result screen either way - same pattern as tryUpload()'s WiFi-offline
 // screen. "back" on the result screen returns to the Network submenu.
 void connectAndReport(const String &ssid, const String &password) {
-  ui.showMessage("Connecting...", {ssid});
+  ui.showMessage("Connecting...", {ssid}, 1);  // kScaleBody - default kScaleLabel wraps mid-word on the 135px-wide screen
   bool ok = uploader.connect(ssid, password);
   if (ok) {
     Sounds::recordEnd();
@@ -630,17 +653,19 @@ void submitKeyboardPassword() {
 // Executes the currently-selected item in the Network submenu.
 void runSelectedNetworkMenuItem() {
   String label = kNetworkMenuItems[networkMenuSelectedIndex].label;
-  if (label == "WiFi") {
+  if (label == "Connect") {
+    // Same fallback as connectPreferredOrDefault(): prefer the last-saved
+    // network, but if nothing's been saved via the menu yet, fall back to
+    // config.h's WIFI_SSID/WIFI_PASSWORD instead of refusing to connect -
+    // those are a real usable network, not just a boot-time default.
     String ssid = wifiStore.preferredSsid();
-    if (!ssid.length()) {
-      ui.showStatus(Severity::kWarn, "No saved network", {"Use \"Add new WiFi\"", "to connect first."}, "back", false);
-      state = State::INFO;
-      infoReturnTo = InfoReturnTo::kNetworkMenu;
-      menuLastActivityMs = millis();
-      return;
-    }
     String pass;
-    wifiStore.findPassword(ssid, pass);
+    if (ssid.length()) {
+      wifiStore.findPassword(ssid, pass);
+    } else {
+      ssid = WIFI_SSID;
+      pass = WIFI_PASSWORD;
+    }
     connectAndReport(ssid, pass);
     return;
   }
@@ -713,6 +738,12 @@ void setup() {
 
 void loop() {
   M5.update();
+  syncWebServerWithWifi();
+  // Paused during RECORDING so HTTP handling never competes with the
+  // audio-to-SD path for CPU/stack; the server keeps listening (browsers
+  // just wait) and resumes servicing requests on the next non-recording
+  // iteration.
+  if (state != State::RECORDING) webServer.handleClient();
   // Two dedicated buttons, no hold gesture: G11 selects/records, G12
   // navigates. The rotary encoder mirrors both - rotation is the same as a
   // G12 press (with direction for menuStepBack), its own click is the same
@@ -822,14 +853,15 @@ void loop() {
         }
         int batteryPct = cachedBatteryPct;
         bool wifiConnected = WiFi.status() == WL_CONNECTED;
-        bool clockChanged = justEnteredIdle || lastIdleClockBuf != clockBuf || lastIdleWifi != wifiConnected ||
+        int wifiPct = wifiConnected ? rssiToPercent(WiFi.RSSI()) : -1;
+        bool clockChanged = justEnteredIdle || lastIdleClockBuf != clockBuf || lastIdleWifiPct != wifiPct ||
                              lastIdleSdOk != sdOk || lastIdleBatteryPct != batteryPct;
         if (clockChanged) {
           lastIdleClockBuf = clockBuf;
-          lastIdleWifi = wifiConnected;
+          lastIdleWifiPct = wifiPct;
           lastIdleSdOk = sdOk;
           lastIdleBatteryPct = batteryPct;
-          ui.showIdle(clockBuf, wifiConnected, sdOk, sdFreePct, lastRecordingSeconds, batteryPct, justEnteredIdle);
+          ui.showIdle(clockBuf, wifiPct, sdOk, sdFreePct, lastRecordingSeconds, batteryPct, justEnteredIdle);
         }
       }
       if (AUTO_UPLOAD_WHEN_IDLE && (millis() - lastUploadAttemptMs > UPLOAD_RETRY_INTERVAL_MS)) {
@@ -883,6 +915,8 @@ void loop() {
         // G11 (or encoder click): select the highlighted item.
         menuLastActivityMs = millis();
         runSelectedMenuItem();
+      } else if (shakeBack) {
+        goIdle();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();  // walked away / forgot about it
       }
@@ -894,7 +928,7 @@ void loop() {
       // from (main menu, Storage submenu, or Network submenu); anything else
       // (or a timeout) also bails out to keep the UI from ever feeling stuck
       // on one screen.
-      if (select || nav) {
+      if (select || nav || shakeBack) {
         if (infoReturnTo == InfoReturnTo::kStorageMenu) enterStorageMenu();
         else if (infoReturnTo == InfoReturnTo::kNetworkMenu) enterNetworkMenu();
         else enterMenu();

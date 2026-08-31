@@ -131,14 +131,14 @@
   .hero-grid {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
   }
   .hero-card {
     position: relative;
     background: linear-gradient(160deg, var(--panel), var(--panel-2));
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 16px 16px 14px;
+    padding: 10px 16px 8px;
     overflow: hidden;
     text-align: center;
     cursor: pointer;
@@ -163,7 +163,7 @@
     letter-spacing: 0.06em;
     color: var(--text-faint);
     font-weight: 600;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -179,14 +179,14 @@
     font-size: 11px;
   }
   .hero-card .value {
-    font-size: 2.1rem;
+    font-size: 1.6rem;
     font-weight: 700;
     letter-spacing: -0.02em;
     line-height: 1;
     font-variant-numeric: tabular-nums;
   }
   .hero-card .footnote {
-    margin-top: 8px;
+    margin-top: 4px;
     font-size: 0.76rem;
     color: var(--text-dim);
   }
@@ -203,6 +203,59 @@
   .hero-card.archived .icon { background: rgba(154, 161, 181, 0.16); color: var(--text-dim); }
   .hero-card.queue { --glow-color: rgba(94, 189, 255, 0.30); cursor: default; }
   .hero-card.queue .icon { background: rgba(94, 189, 255, 0.16); color: #5ebdff; }
+  .hero-card.uploading { --glow-color: rgba(94, 230, 216, 0.30); cursor: default; }
+  .hero-card.uploading .icon { background: rgba(94, 230, 216, 0.16); color: var(--accent-2); }
+
+  /* ---------- Upload progress bar (indeterminate shimmer - the server only
+     ever knows bytes received so far, never a chunked upload's final size) ---------- */
+  .upload-bar-track {
+    position: relative;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  .upload-bar-fill {
+    position: absolute;
+    inset: 0;
+    width: 40%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, transparent, var(--accent-2), var(--accent), transparent);
+    background-size: 200% 100%;
+    animation: uploadShimmer 1.6s ease-in-out infinite;
+    box-shadow: 0 0 12px var(--accent-glow);
+  }
+  @keyframes uploadShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(350%); }
+  }
+  .upload-bar-track.idle .upload-bar-fill { display: none; }
+  .upload-file-list {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+  }
+  .upload-file-list .item {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+  .upload-file-list .item .fname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .upload-file-list .item .fbytes {
+    flex-shrink: 0;
+    color: var(--accent-2);
+    font-variant-numeric: tabular-nums;
+  }
 
   /* ---------- Table panel ---------- */
   .panel {
@@ -686,6 +739,12 @@
         <div class="value" id="statQueue">–</div>
         <div class="footnote" id="statQueueNote">–</div>
       </div>
+      <div class="hero-card uploading">
+        <div class="label"><span class="icon"><i class="fa-solid fa-cloud-arrow-up"></i></span> Partial uploads</div>
+        <div class="value" id="statPartial">–</div>
+        <div class="upload-bar-track idle" id="partialBarTrack"><div class="upload-bar-fill"></div></div>
+        <div class="upload-file-list" id="partialFileList"></div>
+      </div>
     </div>
   </div>
 
@@ -896,6 +955,16 @@ function renderStats(stats) {
   document.getElementById("statQueueNote").textContent = stats.queue_length > 0
     ? "Whisper/LLM jobs run one at a time"
     : "Idle";
+
+  const partials = stats.partial_uploads || [];
+  document.getElementById("statPartial").textContent = partials.length;
+  document.getElementById("partialBarTrack").classList.toggle("idle", partials.length === 0);
+  document.getElementById("partialFileList").innerHTML = partials.slice(0, 3).map(p => `
+    <div class="item">
+      <span class="fname">${escapeHtml(p.name)}</span>
+      <span class="fbytes">${fmtBytes(p.bytes_received)}</span>
+    </div>
+  `).join("") || `<div class="item"><span class="fname">No uploads in progress</span></div>`;
 }
 
 function renderTable() {

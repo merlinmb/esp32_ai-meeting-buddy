@@ -28,7 +28,7 @@
 // Menu icon glyphs are drawn shapes representing what the item does, not a
 // generic marker - see drawGlyph(). Severity glyphs (kGood/kWarn/kCrit)
 // override this with a status ring so e.g. Storage can flip to a critical X.
-enum class Glyph { kNone, kPlay, kUpload, kWifi, kDisk, kInfo, kPower, kExit, kGood, kWarn, kCrit };
+enum class Glyph { kNone, kPlay, kUpload, kWifi, kDisk, kInfo, kPower, kExit, kGood, kWarn, kCrit, kPlus, kBattery, kWaveform };
 
 struct MenuItem {
   const char *label;
@@ -40,6 +40,11 @@ enum class Severity { kInfo, kGood, kWarn, kCrit };
 
 class UiDisplay {
  public:
+  // Row spacing baseline for showMenu() - the main menu's item count, so
+  // every menu (main/Storage/Network) shares the same gap between rows
+  // regardless of how many items it actually has.
+  static const int kStandardMenuRowCount = 6;
+
   bool begin() {
     M5.Lcd.setRotation(0);  // portrait mode: 135 wide x 240 tall
     _w = M5.Lcd.width();
@@ -53,6 +58,7 @@ class UiDisplay {
     _warn = M5.Lcd.color565(251, 191, 36);
     _crit = M5.Lcd.color565(248, 113, 113);
     _purple = M5.Lcd.color565(167, 139, 250);
+    _teal = M5.Lcd.color565(45, 212, 191);
 
     M5.Lcd.fillScreen(_bg);
     return true;
@@ -64,10 +70,14 @@ class UiDisplay {
   // different one (menu/recording/etc); on routine per-minute redraws all
   // glyphs are opaque at fixed positions, so skipping fillScreen() avoids a
   // visible flash.
-  void showIdle(const String &clockStr, bool wifiConnected, bool sdOk, float sdFreePct, uint32_t lastRecordingSeconds, int batteryPercent = 100, bool clearFirst = true) {
+  // wifiPct: signal strength 0-100 while connected, or -1 while offline -
+  // a %, not just "Connected", so the row is actually informative about
+  // link quality at a glance (weak signal shows as a warning color even
+  // while technically connected).
+  void showIdle(const String &clockStr, int wifiPct, bool sdOk, float sdFreePct, uint32_t lastRecordingSeconds, int batteryPercent = 100, bool clearFirst = true) {
     if (clearFirst) M5.Lcd.fillScreen(_bg);
 
-    centerText(clockStr, 16, _text, kScaleBig);
+    centerText(clockStr, 16, _teal, kScaleBig);
 
     uint32_t m = lastRecordingSeconds / 60;
     uint32_t s = lastRecordingSeconds % 60;
@@ -77,6 +87,14 @@ class UiDisplay {
     snprintf(sdBuf, sizeof(sdBuf), "%d%%", (int)(sdFreePct + 0.5f));
     char batBuf[8];
     snprintf(batBuf, sizeof(batBuf), "%d%%", batteryPercent);
+    char wifiBuf[8];
+    snprintf(wifiBuf, sizeof(wifiBuf), "%d%%", wifiPct);
+    bool wifiConnected = wifiPct >= 0;
+    uint16_t wifiColor = wifiConnected ? _good : _crit;
+    // Same free-space bands as the Storage menu's critical flip, plus a
+    // mid "getting full" warning band the menu icon doesn't need.
+    uint16_t sdColor = !sdOk ? _crit : (sdFreePct < 10.0f ? _crit : (sdFreePct < 45.0f ? _warn : _good));
+    uint16_t batColor = batteryPercent < 10 ? _crit : (batteryPercent < 45 ? _warn : _good);
 
     // Four rows spaced to fill the space between the clock and the footer,
     // rather than a hardcoded step that could overflow on a different
@@ -84,10 +102,10 @@ class UiDisplay {
     int top = 68, bottom = reserveFooter();
     int y = top;
     int step = (bottom - top) / 4;
-    y = drawStatusRow("Wi-Fi", wifiConnected ? "Connected" : "Offline", wifiConnected ? Severity::kGood : Severity::kWarn, y, step);
-    y = drawStatusRow("SD card", sdOk ? sdBuf : "Missing", sdOk ? Severity::kGood : Severity::kCrit, y, step);
-    y = drawStatusRow("Battery", batBuf, Severity::kInfo, y, step);
-    drawStatusRow("Last rec", durBuf, Severity::kInfo, y, step);
+    y = drawStatusRow("Wi-Fi", wifiConnected ? wifiBuf : "Offline", Glyph::kWifi, wifiColor, y, step);
+    y = drawStatusRow("SD card", sdOk ? sdBuf : "Missing", Glyph::kDisk, sdColor, y, step);
+    y = drawStatusRow("Battery", batBuf, Glyph::kBattery, batColor, y, step, batteryPercent);
+    drawStatusRow("Last rec", durBuf, Glyph::kWaveform, _text, y, step);
 
     drawFooter("record", false, "menu", true);
   }
@@ -181,19 +199,20 @@ class UiDisplay {
   // Menu: selection is a solid filled pill (not just an outline) so it's
   // unambiguous at a glance; each item gets a glyph representing what it
   // does (play triangle, upload arrow, wifi bars, disk, info, power, exit)
-  // instead of every row carrying the same generic marker. Row spacing is
-  // derived from how many items actually fit above the footer, so it can
-  // never grow into the footer's nav/select hints the way a fixed step could, and every
-  // passed-in item is shown (no silent cap). All labels render at the same
-  // fixed kScaleBody - no per-item shrinking, so weight stays consistent,
-  // and body size (not the larger label size) keeps a 7-item menu compact.
+  // instead of every row carrying the same generic marker. Row spacing (step)
+  // is fixed off kStandardMenuRowCount - the main menu's item count - rather
+  // than dividing the available space by however many items this particular
+  // menu has, so a shorter submenu (e.g. Storage's 3 items) keeps the same
+  // gap as the main menu instead of stretching to fill the screen. A menu
+  // longer than kStandardMenuRowCount falls back to shrinking the step so it
+  // still fits above the footer instead of running into it.
   void showMenu(const std::vector<MenuItem> &items, int selectedIndex) {
     M5.Lcd.fillScreen(_bg);
     leftText("MENU", 10, 10, _muted, kScaleBody);
 
     int top = 34, bottom = reserveFooter();
     size_t count = items.size();
-    int step = count ? (bottom - top) / (int)count : 0;
+    int step = count ? (bottom - top) / (int)max(count, (size_t)kStandardMenuRowCount) : 0;
     int rowH = min(step - 4, 26);
     if (rowH < 14) rowH = min(step - 2, step);  // degrade gracefully if a very long menu is ever passed
 
@@ -467,14 +486,15 @@ class UiDisplay {
   // word-wrapped at the fixed kScaleBody size (never shrunk) - callers pass
   // full sentences rather than pre-breaking lines by hand.
   void showStatus(Severity sev, const String &headline, const std::vector<String> &body,
-                   const String &footerPrimary = "", bool footerPrimaryIsNav = false) {
+                   const String &footerPrimary = "", bool footerPrimaryIsNav = false,
+                   int headlineScale = kScaleLabel) {
     M5.Lcd.fillScreen(_bg);
 
     drawIcon(sev, _w / 2, 38, -1, 16);
     int y = 66, bottom = reserveFooter();
-    for (auto &line : wrapAtScale(headline, kScaleLabel, _w - 16)) {
-      centerText(line, y, _text, kScaleLabel);
-      y += 18;
+    for (auto &line : wrapAtScale(headline, headlineScale, _w - 16)) {
+      centerText(line, y, _text, headlineScale);
+      y += headlineScale * 8 + 2;
     }
     y += 16;
     for (auto &para : body) {
@@ -493,8 +513,8 @@ class UiDisplay {
 
   // Kept for the few genuinely neutral one-off messages that don't need
   // severity treatment.
-  void showMessage(const String &headline, const std::vector<String> &body = {}) {
-    showStatus(Severity::kInfo, headline, body);
+  void showMessage(const String &headline, const std::vector<String> &body = {}, int headlineScale = kScaleLabel) {
+    showStatus(Severity::kInfo, headline, body, "", false, headlineScale);
   }
 
   // Boot screen: a scrolling log of real setup() steps as they complete,
@@ -535,7 +555,7 @@ class UiDisplay {
   static const int kScaleBig = 4;       // 32px: clock, REC timer
 
   int _w = 135, _h = 240;
-  uint16_t _bg, _text, _muted, _accent, _good, _warn, _crit, _purple;
+  uint16_t _bg, _text, _muted, _accent, _good, _warn, _crit, _purple, _teal;
   static const size_t kMaxBootLines = 6;
   std::vector<std::pair<String, Severity>> _bootLines;
   int _bootLogTop = 118;
@@ -603,7 +623,7 @@ class UiDisplay {
   // radius (default 11); every shape's dimensions scale off it as a
   // fraction, so passing a smaller r shrinks the whole glyph consistently
   // instead of each shape needing its own hardcoded size.
-  void drawGlyph(Glyph g, int cx, int cy, int colorOverride = -1, int eraseColorOverride = -1, int r = 11) {
+  void drawGlyph(Glyph g, int cx, int cy, int colorOverride = -1, int eraseColorOverride = -1, int r = 11, int level = -1) {
     uint16_t color = colorOverride >= 0 ? (uint16_t)colorOverride : glyphColor(g);
     uint16_t eraseColor = eraseColorOverride >= 0 ? (uint16_t)eraseColorOverride : _bg;
     switch (g) {
@@ -627,6 +647,41 @@ class UiDisplay {
         M5.Lcd.drawCircle(cx, cy + r * 4 / 11, r * 6 / 11, color);
         M5.Lcd.fillCircle(cx, cy + r * 4 / 11, max(1, r * 2 / 11), color);
         return;
+      case Glyph::kPlus: {
+        int t = max(1, r * 3 / 11);
+        M5.Lcd.fillRect(cx - t / 2, cy - r, t, r * 2, color);
+        M5.Lcd.fillRect(cx - r, cy - t / 2, r * 2, t, color);
+        return;
+      }
+      case Glyph::kBattery: {
+        // Phone-style battery: wide rounded body + small nub on the right,
+        // filled from the left in proportion to level (0-100; -1 = full).
+        int bw = r * 18 / 11, bh = r * 10 / 11;
+        int x0 = cx - bw / 2, y0 = cy - bh / 2;
+        int nubW = max(1, r * 2 / 11), nubH = bh / 2;
+        M5.Lcd.drawRoundRect(x0, y0, bw, bh, max(1, r * 2 / 11), color);
+        M5.Lcd.fillRect(x0 + bw, cy - nubH / 2, nubW, nubH, color);
+        int pct = level < 0 ? 100 : level;
+        int pad = max(1, r * 2 / 11);
+        int fillW = ((bw - pad * 2) * pct) / 100;
+        if (fillW > 0) M5.Lcd.fillRect(x0 + pad, y0 + pad, fillW, bh - pad * 2, color);
+        return;
+      }
+      case Glyph::kWaveform: {
+        // Small static waveform (mirrored bars), reads as "audio" at a
+        // glance without needing to animate like the live recording view.
+        static const int kBars = 5;
+        static const int kHeights[kBars] = {4, 8, 11, 7, 5};  // in elevenths of r
+        int bw = max(1, r * 3 / 11), gap = max(1, r * 2 / 11);
+        int totalW = bw * kBars + gap * (kBars - 1);
+        int x = cx - totalW / 2;
+        for (int i = 0; i < kBars; i++) {
+          int bh = max(2, r * kHeights[i] / 11);
+          M5.Lcd.fillRect(x, cy - bh / 2, bw, bh, color);
+          x += bw + gap;
+        }
+        return;
+      }
       case Glyph::kDisk: {
         int hw = r * 9 / 11, hh = r * 11 / 11;
         M5.Lcd.drawRoundRect(cx - hw, cy - hh, hw * 2, hh * 2, max(1, r * 3 / 11), color);
@@ -640,14 +695,15 @@ class UiDisplay {
         M5.Lcd.drawFastVLine(cx, cy - r, r * 8 / 11, color);
         return;
       case Glyph::kExit:
-        // A door-out arrow: vertical bar (frame) + arrow pointing right,
-        // reads clearly as "leave this menu" distinct from Power's button.
-        M5.Lcd.drawFastVLine(cx - r * 6 / 11, cy - r * 8 / 11, r * 16 / 11, color);
-        M5.Lcd.drawFastHLine(cx - r * 6 / 11, cy - r * 8 / 11, r * 4 / 11, color);
-        M5.Lcd.drawFastHLine(cx - r * 6 / 11, cy + r * 8 / 11, r * 4 / 11, color);
-        M5.Lcd.drawLine(cx - r * 2 / 11, cy, cx + r, cy, color);
-        M5.Lcd.drawLine(cx + r * 4 / 11, cy - r * 5 / 11, cx + r, cy, color);
-        M5.Lcd.drawLine(cx + r * 4 / 11, cy + r * 5 / 11, cx + r, cy, color);
+        // A door-out arrow: vertical bar (frame) on the right + arrow
+        // pointing left into the doorway, reads clearly as "leave this
+        // menu" (back out through the door) distinct from Power's button.
+        M5.Lcd.drawFastVLine(cx + r * 6 / 11, cy - r * 8 / 11, r * 16 / 11, color);
+        M5.Lcd.drawFastHLine(cx + r * 2 / 11, cy - r * 8 / 11, r * 4 / 11, color);
+        M5.Lcd.drawFastHLine(cx + r * 2 / 11, cy + r * 8 / 11, r * 4 / 11, color);
+        M5.Lcd.drawLine(cx + r * 2 / 11, cy, cx - r, cy, color);
+        M5.Lcd.drawLine(cx - r * 4 / 11, cy - r * 5 / 11, cx - r, cy, color);
+        M5.Lcd.drawLine(cx - r * 4 / 11, cy + r * 5 / 11, cx - r, cy, color);
         return;
     }
   }
@@ -846,8 +902,8 @@ class UiDisplay {
   // y for the next row, spaced by the caller-supplied step so rows always
   // fill the space available between fixed anchors rather than a hardcoded
   // step that can overflow when the layout changes.
-  int drawStatusRow(const String &label, const String &value, Severity sev, int y, int step) {
-    drawIcon(sev, 22, y + 8, -1, 10);
+  int drawStatusRow(const String &label, const String &value, Glyph g, uint16_t color, int y, int step, int level = -1) {
+    drawGlyph(g, 22, y + 14, color, -1, 10, level);
     leftText(label, 40, y - 2, _muted, kScaleBody);
     leftText(value, 40, y + 8, _text, kScaleLabel);
     return y + step;

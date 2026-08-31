@@ -422,6 +422,26 @@ def queue_length() -> int:
     return waiting + 1 if _job_in_progress else waiting
 
 
+def list_partial_uploads() -> list[dict]:
+    """Chunked uploads (see /upload/chunk) that are still in flight - a
+    '<name>.wav.part' file sitting in RAW_AUDIO_DIR with more chunks still to
+    come. The protocol never tells the server a file's final size upfront, so
+    only bytes-received-so-far is available, not a percentage."""
+    partials = []
+    for part_path in RAW_AUDIO_DIR.glob("*.wav.part"):
+        try:
+            stat = part_path.stat()
+        except OSError:
+            continue
+        partials.append({
+            "name": part_path.name[: -len(".part")],
+            "bytes_received": stat.st_size,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=None).isoformat(timespec="seconds"),
+        })
+    partials.sort(key=lambda p: p["updated_at"], reverse=True)
+    return partials
+
+
 threading.Thread(target=_job_worker, daemon=True).start()
 
 
@@ -511,6 +531,10 @@ def upload_chunk():
         offset = int(request.headers.get("X-Chunk-Offset", ""))
     except ValueError:
         return "missing/invalid X-Chunk-Offset", 400
+    try:
+        declared_len = int(request.headers.get("Content-Length", ""))
+    except ValueError:
+        return "missing/invalid Content-Length", 400
     is_final = request.headers.get("X-Upload-Final", "") == "1"
 
     safe_name = sanitize_upload_filename(name)
@@ -526,16 +550,38 @@ def upload_chunk():
     if offset != current_size:
         return str(current_size), 409, {"Content-Type": "text/plain"}
 
-    with open(part_path, "ab") as f:
-        while True:
-            piece = request.stream.read(CHUNK_READ_BUFFER)
+    # Read exactly as many bytes as the client declared, and verify that's
+    # what actually arrived before appending anything - a dropped connection
+    # or truncated stream must never be allowed to land a short write on
+    # disk, because that write would still get ack'd as valid progress
+    # (current_size advances), permanently desyncing the device's own
+    # offset bookkeeping from what's really on disk for the rest of this
+    # file's upload.
+    received = bytearray()
+    try:
+        remaining = declared_len
+        while remaining > 0:
+            piece = request.stream.read(min(CHUNK_READ_BUFFER, remaining))
             if not piece:
-                break  # client disconnected mid-chunk - keep whatever landed, device will resume from it
-            f.write(piece)
+                break  # connection dropped before declared_len bytes arrived
+            received.extend(piece)
+            remaining -= len(piece)
+    except (OSError, ConnectionError):
+        pass  # treated the same as a clean short read below
+
+    if len(received) != declared_len:
+        return str(current_size), 400, {"Content-Type": "text/plain"}
+
+    with open(part_path, "ab") as f:
+        f.write(received)
         f.flush()
         os.fsync(f.fileno())  # survive a server crash between chunks, not just an app-level error
 
     new_size = part_path.stat().st_size
+    if new_size != current_size + declared_len:
+        # Another request raced us onto the same .part file, or the OS
+        # buffered less than we wrote - don't trust the size, don't finalize.
+        return str(new_size), 409, {"Content-Type": "text/plain"}
 
     if not is_final:
         return str(new_size), 200, {"Content-Type": "text/plain"}
@@ -590,6 +636,7 @@ def list_meetings():
 def stats():
     result = store.stats()
     result["queue_length"] = queue_length()
+    result["partial_uploads"] = list_partial_uploads()
     return jsonify(result)
 
 

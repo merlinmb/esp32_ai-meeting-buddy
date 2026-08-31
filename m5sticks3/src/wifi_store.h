@@ -65,6 +65,24 @@ class WifiStore {
     prefs.end();
   }
 
+  // Removes one saved network by SSID. If it was the preferred network,
+  // the preferred SSID is cleared (falls back to config.h's default, same
+  // as when nothing has ever been saved).
+  void remove(const String &ssid) {
+    std::vector<SavedNetwork> networks = load();
+    for (size_t i = 0; i < networks.size(); i++) {
+      if (networks[i].ssid == ssid) { networks.erase(networks.begin() + i); break; }
+    }
+    writeAll(networks);
+
+    Preferences prefs;
+    prefs.begin(kNamespace, false);
+    if (prefs.getString("lastSsid", "") == ssid) {
+      prefs.putString("lastSsid", networks.empty() ? "" : networks.back().ssid);
+    }
+    prefs.end();
+  }
+
   bool findPassword(const String &ssid, String &outPassword) {
     for (auto &n : load()) {
       if (n.ssid == ssid) { outPassword = n.password; return true; }
