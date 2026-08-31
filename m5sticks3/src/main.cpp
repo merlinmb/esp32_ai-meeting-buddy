@@ -1019,20 +1019,27 @@ void loop() {
     }
 
     case State::PLAYBACK_LIST: {
+      // The list has one extra row past the recordings themselves - a
+      // trailing "Back" entry (see ui.showRecordingList()) - so there's
+      // always a deliberate way out of this screen via G11, not just the
+      // shake gesture or the idle timeout.
+      int rowCount = (int)playbackList.size() + 1;
       if (nav) {
         // G12 (or encoder rotation): move the highlight only.
-        if (!playbackList.empty()) {
-          int count = (int)playbackList.size();
-          playbackSelectedIndex = menuStepBack
-                                       ? (playbackSelectedIndex + count - 1) % count
-                                       : (playbackSelectedIndex + 1) % count;
-        }
+        playbackSelectedIndex = menuStepBack
+                                     ? (playbackSelectedIndex + rowCount - 1) % rowCount
+                                     : (playbackSelectedIndex + 1) % rowCount;
         playbackLastActivityMs = millis();
         ui.showRecordingList(playbackList, playbackSelectedIndex);
       } else if (select) {
-        // G11 (or encoder click): play the highlighted item.
+        // G11 (or encoder click): play the highlighted item, or back out if
+        // the trailing "Back" row is highlighted.
         playbackLastActivityMs = millis();
-        startPlayback();
+        if (playbackSelectedIndex >= (int)playbackList.size()) {
+          enterMenu();
+        } else {
+          startPlayback();
+        }
       } else if (shakeBack) {
         enterMenu();
       } else if (millis() - playbackLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
@@ -1050,7 +1057,7 @@ void loop() {
         ui.showPlayback(player.path(), player.elapsedSeconds(), player.totalSeconds(), player.isPaused(), true);
         break;
       }
-      if (shakeBack) {
+      if (nav || shakeBack) {
         player.close();
         enterPlaybackList();
         break;

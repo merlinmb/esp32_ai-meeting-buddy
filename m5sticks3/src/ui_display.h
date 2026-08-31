@@ -238,7 +238,10 @@ class UiDisplay {
     drawFooter("back", false);
   }
 
-  // List of recordings to choose for playback. Scrolls a window around the
+  // List of recordings to choose for playback, plus a trailing "Back" row
+  // (index == names.size()) so there's a deliberate way out of this screen
+  // beyond the shake gesture - same convention as the Storage/Network
+  // submenus' own dedicated "Back" item. Scrolls a window around the
   // selected index rather than trying to fit an arbitrary number of names.
   // Header uses the same icon+title layout as showInfo()/showUploading(),
   // and the same Glyph::kPlay shown for "Playback" in the main menu, so a
@@ -248,33 +251,32 @@ class UiDisplay {
     drawGlyph(Glyph::kPlay, 22, 20, -1, -1, 10);
     leftText("PLAYBACK", 40, 14, _muted, kScaleBody);
 
-    if (names.empty()) {
-      centerText("No recordings", 100, _muted, kScaleBody);
-    } else {
-      const int kVisible = 6;
-      int start = selectedIndex - kVisible / 2;
-      if (start < 0) start = 0;
-      if (start > (int)names.size() - kVisible) start = max(0, (int)names.size() - kVisible);
+    int rowCount = (int)names.size() + 1;  // +1 for the trailing "Back" row
+    const int kVisible = 6;
+    int start = selectedIndex - kVisible / 2;
+    if (start < 0) start = 0;
+    if (start > rowCount - kVisible) start = max(0, rowCount - kVisible);
 
-      int top = 34, bottom = reserveFooter();
-      int shown = min((int)names.size() - start, kVisible);
-      int step = shown ? (bottom - top) / shown : 0;
-      int rowH = min(step - 4, 30);
+    int top = 34, bottom = reserveFooter();
+    int shown = min(rowCount - start, kVisible);
+    int step = shown ? (bottom - top) / shown : 0;
+    int rowH = min(step - 4, 30);
 
-      int y = top;
-      for (int i = start; i < (int)names.size() && i < start + kVisible; i++) {
-        bool sel = (i == selectedIndex);
-        uint16_t fg = sel ? _bg : _text;
-        uint16_t rowBg = sel ? _accent : _bg;
-        if (sel) {
-          M5.Lcd.fillRoundRect(6, y, _w - 12, rowH, 6, _accent);
-        }
-        leftText(shortName(names[i]), 14, y + rowH / 2 - 4, fg, kScaleBody, rowBg);
-        y += step;
+    int y = top;
+    for (int i = start; i < rowCount && i < start + kVisible; i++) {
+      bool sel = (i == selectedIndex);
+      uint16_t fg = sel ? _bg : _text;
+      uint16_t rowBg = sel ? _accent : _bg;
+      if (sel) {
+        M5.Lcd.fillRoundRect(6, y, _w - 12, rowH, 6, _accent);
       }
+      String label = (i < (int)names.size()) ? shortName(names[i]) : "Back";
+      leftText(label, 14, y + rowH / 2 - 4, fg, kScaleBody, rowBg);
+      y += step;
     }
 
-    drawFooter("play", false, "next", true);
+    bool onBackRow = selectedIndex >= (int)names.size();
+    drawFooter(onBackRow ? "back" : "play", false, "next", true);
   }
 
   // List of scanned WiFi networks to choose to connect to. Same
