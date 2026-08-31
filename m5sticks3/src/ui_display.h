@@ -277,6 +277,140 @@ class UiDisplay {
     drawFooter("play", false, "next", true);
   }
 
+  // List of scanned WiFi networks to choose to connect to. Same
+  // scroll-a-window-around-the-selection shape as showRecordingList(), with
+  // a small dot prefix on rows whose password is already saved so the user
+  // can tell a rescan-and-reselect will skip the password prompt.
+  void showNetworkList(const std::vector<String> &ssids, int selectedIndex, const std::vector<bool> &saved) {
+    M5.Lcd.fillScreen(_bg);
+    drawGlyph(Glyph::kWifi, 22, 20, -1, -1, 10);
+    leftText("NETWORKS", 40, 14, _muted, kScaleBody);
+
+    if (ssids.empty()) {
+      centerText("No networks found", 100, _muted, kScaleBody);
+    } else {
+      const int kVisible = 6;
+      int start = selectedIndex - kVisible / 2;
+      if (start < 0) start = 0;
+      if (start > (int)ssids.size() - kVisible) start = max(0, (int)ssids.size() - kVisible);
+
+      int top = 34, bottom = reserveFooter();
+      int shown = min((int)ssids.size() - start, kVisible);
+      int step = shown ? (bottom - top) / shown : 0;
+      int rowH = min(step - 4, 30);
+
+      int y = top;
+      for (int i = start; i < (int)ssids.size() && i < start + kVisible; i++) {
+        bool sel = (i == selectedIndex);
+        uint16_t fg = sel ? _bg : _text;
+        uint16_t rowBg = sel ? _accent : _bg;
+        if (sel) {
+          M5.Lcd.fillRoundRect(6, y, _w - 12, rowH, 6, _accent);
+        }
+        String label = (i < (int)saved.size() && saved[i]) ? "* " + ssids[i] : ssids[i];
+        leftText(label, 14, y + rowH / 2 - 4, fg, kScaleBody, rowBg);
+        y += step;
+      }
+    }
+
+    drawFooter("connect", false, "next", true);
+  }
+
+  // On-screen QWERTY-ish grid keyboard for entering a WiFi password with
+  // just next-cell/select-cell input (no touchscreen) - modeled on the
+  // Bruce firmware's generalKeyboard(). A 2D cursor (col,row) rather than a
+  // flat index because the caller (main.cpp) needs to know which physical
+  // grid cell is highlighted to move it in the 4 wrap-around directions;
+  // showKeyboard() itself only draws whatever cell it's told is selected -
+  // all the actual cursor math lives in main.cpp next to the other list
+  // navigation state, same as menuSelectedIndex/playbackSelectedIndex.
+  //
+  // Layout is fixed (not passed in) since only password entry needs this
+  // right now - see kKeyRows below.
+  static const int kKeyCols = 7;
+  static const int kKeyRows = 5;
+
+  // Special (non-character) keys, returned by keyAt() using values outside
+  // the printable ASCII range so callers can switch on them alongside real
+  // chars without a separate enum.
+  static const char kKeyShift = 1;
+  static const char kKeyBackspace = 2;
+  static const char kKeySpace = 3;
+  static const char kKeyOk = 4;
+  static const char kKeyCancel = 5;
+
+  // [row][col] -> {lower, upper}. '\0' cells are unused (kept only so every
+  // row is the same width for simple indexing).
+  char keyAt(int row, int col, bool shift) {
+    static const char kLower[kKeyRows][kKeyCols] = {
+        {'1', '2', '3', '4', '5', '6', '7'},
+        {'q', 'w', 'e', 'r', 't', 'y', 'u'},
+        {'i', 'o', 'p', 'a', 's', 'd', 'f'},
+        {'g', 'h', 'j', 'k', 'l', 'z', 'x'},
+        {'c', 'v', 'b', 'n', 'm', kKeyShift, kKeyBackspace},
+    };
+    static const char kUpper[kKeyRows][kKeyCols] = {
+        {'8', '9', '0', '-', '_', '.', '@'},
+        {'Q', 'W', 'E', 'R', 'T', 'Y', 'U'},
+        {'I', 'O', 'P', 'A', 'S', 'D', 'F'},
+        {'G', 'H', 'J', 'K', 'L', 'Z', 'X'},
+        {'C', 'V', 'B', 'N', 'M', kKeyShift, kKeyBackspace},
+    };
+    if (row < 0 || row >= kKeyRows || col < 0 || col >= kKeyCols) return '\0';
+    // Bottom-right two cells are always SPACE/OK/CANCEL regardless of
+    // shift state - handled by the caller via keyLabel()/dedicated rows
+    // below rather than living in the grid, to keep the grid all-letters.
+    return shift ? kUpper[row][col] : kLower[row][col];
+  }
+
+  // OK/CANCEL/SPACE sit in a dedicated row below the letter grid (row
+  // kKeyRows) rather than stealing letter cells, so every letter/digit stays
+  // reachable at every shift state. Three cells: col 0 = SPACE, col 1 = OK,
+  // col 2 = CANCEL - narrower cursor range than the letter grid's kKeyCols,
+  // so main.cpp's navigation clamps col to [0,2] whenever it enters this row.
+  static const int kActionRow = kKeyRows;
+
+  // title: e.g. "PASSWORD". text: what's typed so far. mask: draw dots
+  // instead of the real characters (for a password). cursorCol/cursorRow:
+  // currently-highlighted cell, using kActionRow for the SPACE/OK/CANCEL row.
+  void showKeyboard(const String &title, const String &text, bool mask, bool shift, int cursorCol, int cursorRow) {
+    M5.Lcd.fillScreen(_bg);
+    drawGlyph(Glyph::kWifi, 22, 20, -1, -1, 10);
+    leftText(title, 40, 14, _muted, kScaleBody);
+
+    String shown = mask ? String() : text;
+    if (mask) for (size_t i = 0; i < text.length(); i++) shown += '*';
+    if (shown.length() == 0) shown = " ";
+    M5.Lcd.fillRect(0, 30, _w, 12, _bg);
+    leftText(shown, 8, 30, _text, kScaleBody);
+
+    int gridTop = 48;
+    int gridBottom = _h - 46;  // leave room for the action row + footer
+    int rowH = (gridBottom - gridTop) / kKeyRows;
+    int colW = (_w - 8) / kKeyCols;
+
+    for (int row = 0; row < kKeyRows; row++) {
+      for (int col = 0; col < kKeyCols; col++) {
+        char k = keyAt(row, col, shift);
+        if (!k) continue;
+        int x = 4 + col * colW;
+        int y = gridTop + row * rowH;
+        bool sel = (row == cursorRow && col == cursorCol);
+        if (sel) M5.Lcd.fillRoundRect(x, y, colW - 2, rowH - 2, 3, _accent);
+        String label = (k == kKeyShift) ? "^" : (k == kKeyBackspace) ? "<" : String(k);
+        uint16_t fg = sel ? _bg : _text;
+        centerTextIn(label, x, colW - 2, y + (rowH - 2) / 2 - 4, fg, sel ? _accent : -1);
+      }
+    }
+
+    int actionY = gridTop + kKeyRows * rowH + 4;
+    drawActionKey("SPACE", 4, actionY, colW * 3 - 2, cursorRow == kActionRow && cursorCol == 0);
+    drawActionKey("OK", 4 + colW * 3, actionY, colW * 2 - 2, cursorRow == kActionRow && cursorCol == 1);
+    drawActionKey("X", 4 + colW * 5, actionY, colW * 2 - 2, cursorRow == kActionRow && cursorCol == 2);
+
+    drawFooter("select", false, "next", true);
+  }
+
   // Playback: filename, elapsed/total, and a scrub bar composed as one
   // block so it reads as a single player rather than scattered facts.
   // Called every ~200ms while playing, so - like showRecording() - this
@@ -548,6 +682,28 @@ class UiDisplay {
     M5.Lcd.setTextWrap(false);  // clip long single-line text instead of wrapping into the row below
     M5.Lcd.setCursor((_w - w) / 2, y);
     M5.Lcd.print(s);
+  }
+
+  // Draws s horizontally centered within [x, x+w) at y - used for keyboard
+  // grid cells, which are laid out in fixed-width columns rather than
+  // full-screen-centered like centerText().
+  void centerTextIn(const String &s, int x, int w, int y, uint16_t color, int bg = -1) {
+    M5.Lcd.setFont(&fonts::Font0);
+    M5.Lcd.setTextSize(kScaleBody);
+    int textW = M5.Lcd.textWidth(s);
+    M5.Lcd.setTextColor(color, bg >= 0 ? (uint16_t)bg : _bg);
+    M5.Lcd.setTextWrap(false);
+    M5.Lcd.setCursor(x + (w - textW) / 2, y);
+    M5.Lcd.print(s);
+  }
+
+  // One wide key in the keyboard's action row (SPACE/OK/CANCEL).
+  void drawActionKey(const String &label, int x, int y, int w, bool sel) {
+    int h = 16;
+    uint16_t bg = sel ? _accent : M5.Lcd.color565(28, 31, 37);
+    uint16_t fg = sel ? _bg : _muted;
+    M5.Lcd.fillRoundRect(x, y, w, h, 3, bg);
+    centerTextIn(label, x, w, y + h / 2 - 4, fg, bg);
   }
 
   // Footer is always bottom-anchored near the bottom of the screen,

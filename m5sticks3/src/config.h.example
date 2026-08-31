@@ -6,7 +6,6 @@
 #define WIFI_PASSWORD  "your-wifi-password"
 #define WIFI_CONNECT_TIMEOUT_MS  15000
 
-
 // ---- Companion receiver server ----------------------------------------
 // Where the device uploads finished recordings. This points at the Docker
 // deployment on savage.local (see server/deploy.sh). arduino-esp32 generally
@@ -17,6 +16,11 @@
 // router's client list).
 #define UPLOAD_SERVER_URL  "http://savage.local:8787/upload"
 
+// Must match UPLOAD_TOKEN in server/.env - the receiver rejects uploads
+// without this. Generate a value with:
+// python -c "import secrets; print(secrets.token_urlsafe(32))"
+#define UPLOAD_TOKEN  "your-upload-token"
+
 // ---- Audio --------------------------------------------------------------
 #define SAMPLE_RATE_HZ   16000   // 16kHz mono is plenty for speech and keeps files small
 #define SAMPLE_BITS      16
@@ -24,8 +28,52 @@
 
 // ---- Behavior -----------------------------------------------------------
 #define AUTO_UPLOAD_WHEN_IDLE  true   // if true, device tries to flush pending recordings to WiFi whenever it's idle and not recording
-#define UPLOAD_RETRY_INTERVAL_MS  (5UL * 60UL * 1000UL)  // don't hammer WiFi if the server is unreachable
+#define UPLOAD_RETRY_INTERVAL_MS  (3UL * 60UL * 1000UL)  // don't hammer WiFi if the server is unreachable
+
+// Uploads are resumable: each file is sent as a series of UPLOAD_CHUNK_BYTES
+// POSTs, and before (re)starting a file the device asks the server how many
+// bytes it already has (GET .../status) and resumes from there - so a long
+// recording doesn't restart from byte 0 after a dropped TLS connection
+// (e.g. the "send_ssl_data(): -80" abort a whole-file POST used to suffer),
+// a reboot, or the next periodic retry - only the chunk(s) that didn't land
+// need resending.
+//
+//   - UPLOAD_SOCKET_TIMEOUT_MS   bounds the TCP/TLS connect and the final
+//                                wait for the server's HTTP response.
+//   - UPLOAD_STALL_TIMEOUT_MS    bounds time with NO forward progress while
+//                                streaming one chunk's body - it resets
+//                                after every buffer written, so a chunk
+//                                that's still moving data is never cut off.
+// UPLOAD_MAX_RETRIES is how many *consecutive* chunk failures a file's
+// upload tolerates before giving up on it for this pass (it stays pending
+// for the next automatic pass or "Upload now"); a retry only costs one
+// chunk, not the whole file, so this doesn't need to be generous.
+#define UPLOAD_CHUNK_BYTES        262144UL   // 256 KB per chunk POST
+#define UPLOAD_SOCKET_TIMEOUT_MS  15000
+#define UPLOAD_STALL_TIMEOUT_MS   15000
+#define UPLOAD_MAX_RETRIES        3
+#define UPLOAD_RETRY_BACKOFF_MS   2000
+
+// Read/write buffer used to stream a chunk's body from SD to the socket.
+// Bigger means fewer, larger TLS record writes per chunk (less framing
+// overhead) at the cost of that many more bytes of stack while a chunk is
+// in flight.
+#define UPLOAD_STREAM_BUFFER_BYTES  8192
 
 // ---- Menu ---------------------------------------------------------------
 #define MENU_IDLE_TIMEOUT_MS  (8UL * 1000UL)   // auto-return to idle if the menu sits untouched this long
-#define DEVICE_VERSION  "0.3"
+#define DEVICE_VERSION  "0.2"
+
+// Recordings shorter than this are discarded on stop (accidental presses).
+#define MIN_RECORDING_SECONDS  5
+
+// ---- Power saving ---------------------------------------------------------
+// Backlight turns off after this much inactivity while idle or recording;
+// any button/encoder/shake input wakes it back up. Skipped entirely while
+// USB is connected.
+#define SCREEN_TIMEOUT_MS  (5UL * 1000UL)
+
+// Light-sleep after this much inactivity while idle (never while recording).
+// G11/G12 wake the device back up, same as they wake the screen. Skipped
+// entirely while USB is connected.
+#define SLEEP_TIMEOUT_MS  (5UL * 60UL * 1000UL)

@@ -3,8 +3,11 @@
 // Two dedicated buttons, no hold gesture: G11 selects/records, G12
 // navigates. Flow: idle screen -> press G11 -> record to SD as WAV, with a
 // live waveform on the LCD -> press again -> stop, finalize file -> press
-// G12 from idle to open a menu (playback / upload now / wifi info /
-// storage / about) navigated with G12 (next item) and G11 (select).
+// G12 from idle to open a menu (playback / network / storage / about)
+// navigated with G12 (next item) and G11 (select). Network opens a submenu
+// (connect to saved WiFi / scan+add a new one / upload now / disconnect /
+// clear saved networks); adding a new network types its password on an
+// on-screen keyboard grid, navigated the same next/select way.
 // Pushbutton rotary encoder on pins 0/1/8 mirrors both (rotation = G12,
 // click = G11).
 //
@@ -23,6 +26,8 @@
 #include <SD.h>
 #include <vector>
 #include <math.h>
+#include "driver/gpio.h"
+#include "esp_sleep.h"
 
 #include "pins.h"
 #include "config.h"
@@ -32,11 +37,13 @@
 #include "ui_display.h"
 #include "record_button.h"
 #include "wifi_uploader.h"
+#include "wifi_store.h"
 #include "audio_visualizer.h"
 #include "rotary_encoder.h"
 #include "sounds.h"
 
-enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING, STORAGE_MENU };
+enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING, STORAGE_MENU,
+                    NETWORK_MENU, NETWORK_LIST, NETWORK_KEYBOARD };
 
 static State state = State::IDLE;
 
@@ -47,6 +54,7 @@ static RecordButton button(PIN_RECORD_BUTTON, RECORD_BUTTON_ACTIVE_LOW);
 static NavButton navButton(PIN_NAV_BUTTON, NAV_BUTTON_ACTIVE_LOW);
 static RotaryEncoder encoder;
 static WifiUploader uploader;
+static WifiStore wifiStore;
 static AudioVisualizer visualizer;
 static WavPlayer player;
 
@@ -78,13 +86,39 @@ static unsigned long lastBatteryPollMs = 0;
 static int cachedBatteryPct = 100;
 static unsigned long lastUploadAttemptMs = 0;
 static uint32_t lastRecordingSeconds = 0;
+
+// M5Unified's StickS3 board profile doesn't wire up a wakeup pin (unlike
+// e.g. CoreS3), so M5.Power.lightSleep()'s own touch_wakeup only arms
+// whatever board pin M5Unified knows about - nothing, here. Arm G11/G12
+// directly instead so the same two buttons that already wake the screen
+// (see the SCREEN_TIMEOUT_MS handling in loop()) also wake the device from
+// light sleep. Unlike deep sleep, light sleep returns right here on wake
+// rather than restarting the program, so loop() picks back up normally.
+void enterLightSleep() {
+  gpio_wakeup_enable((gpio_num_t)PIN_RECORD_BUTTON, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)PIN_NAV_BUTTON, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+
+  M5.Power.lightSleep(M5.Power.sleep_no_timer, true);
+
+  gpio_wakeup_disable((gpio_num_t)PIN_RECORD_BUTTON);
+  gpio_wakeup_disable((gpio_num_t)PIN_NAV_BUTTON);
+
+  lastActivityMs = millis();
+  if (!screenOn) {
+    screenOn = true;
+    M5.Lcd.wakeup();
+    lastIdleRedrawMs = 0;
+  }
+  forceIdleRedraw = true;
+}
 // Set on entry into RECORDING so showRecording() draws its static chrome
 // once instead of every ~120ms redraw - see the RECORDING case in loop().
 static bool firstRecordingDraw = true;
 
 static std::vector<MenuItem> kMenuItems = {
   {"Playback", Glyph::kPlay},
-  {"Upload now", Glyph::kUpload},
+  {"Network", Glyph::kWifi},
   {"Storage", Glyph::kDisk},  // flips to a critical glyph in refreshMenuIcons() when SD is missing
   {"About", Glyph::kInfo},
   {"Power off", Glyph::kPower},
@@ -103,10 +137,37 @@ static std::vector<MenuItem> kStorageMenuItems = {
   {"Back", Glyph::kExit},
 };
 static int storageMenuSelectedIndex = 0;
-// True when the current INFO screen (or the "Storage cleared" result screen)
-// was entered from the Storage submenu, so backing out returns there instead
-// of the main menu.
-static bool infoReturnsToStorage = false;
+// Which menu an INFO/result screen backs out to - the main menu, Storage, or
+// Network submenu each show their own result screens (e.g. "Storage
+// cleared", "Connected") via the shared INFO state, so backing out needs to
+// know which one launched it.
+enum class InfoReturnTo { kMainMenu, kStorageMenu, kNetworkMenu };
+static InfoReturnTo infoReturnTo = InfoReturnTo::kMainMenu;
+
+// Network submenu: "Clear WiFis" is destructive (wipes every saved
+// network), so - same convention as kStorageMenuItems - it sits below the
+// other actions with "Back" last, never combined with a normal action.
+static std::vector<MenuItem> kNetworkMenuItems = {
+  {"WiFi", Glyph::kWifi},
+  {"Add new WiFi", Glyph::kWifi},
+  {"Upload now", Glyph::kUpload},
+  {"Disconnect", Glyph::kWifi},
+  {"Clear WiFis", Glyph::kCrit},
+  {"Back", Glyph::kExit},
+};
+static int networkMenuSelectedIndex = 0;
+
+static std::vector<String> networkScanList;
+static std::vector<bool> networkScanSaved;
+static int networkListSelectedIndex = 0;
+static unsigned long networkListActivityMs = 0;
+
+// Keyboard cursor: (col,row), with row == UiDisplay's kActionRow meaning the
+// SPACE/OK/CANCEL row (col clamped to 0..2 there instead of 0..kKeyCols-1).
+static int kbCol = 0, kbRow = 0;
+static bool kbShift = false;
+static String kbText;
+static String kbPendingSsid;  // network the keyboard's password is for
 
 // Storage's menu glyph reflects live SD status (disk icon when mounted,
 // critical X when missing/failed) rather than a static icon.
@@ -149,6 +210,25 @@ bool detectShake() {
 int readBatteryPercent() {
   int level = M5.Power.getBatteryLevel();
   return constrain(level, 0, 100);
+}
+
+// True while USB (VBUS) is present, via the M5PM1 PMIC's VBUS monitor
+// (getVBUSVoltage() returns -1 on boards without VBUS sensing).
+bool isUsbConnected() {
+  return M5.Power.getVBUSVoltage() > 0;
+}
+
+// Prefers the last-saved WiFi network (set via the Network menu); falls back
+// to config.h's WIFI_SSID/WIFI_PASSWORD if nothing's been saved yet, so a
+// fresh device still connects out of the box without a trip through the menu.
+bool connectPreferredOrDefault() {
+  String ssid = wifiStore.preferredSsid();
+  if (ssid.length()) {
+    String pass;
+    wifiStore.findPassword(ssid, pass);
+    if (uploader.connect(ssid, pass)) return true;
+  }
+  return uploader.connect();
 }
 
 bool hasPendingUploads() {
@@ -244,7 +324,7 @@ void tryUpload() {
     uiDrawnThisUpload = true;
   }
 
-  if (!uploader.connect()) {
+  if (!connectPreferredOrDefault()) {
     Sounds::error();
     if (screenOn) {
       ui.showStatus(Severity::kWarn, "Wi-Fi offline",
@@ -257,7 +337,7 @@ void tryUpload() {
   }
 
   int chunkProgressDoneCount = 0;
-  uploader.uploadAllPending(
+  int uploadedCount = uploader.uploadAllPending(
       pending,
       [&chunkProgressDoneCount, &uiDrawnThisUpload, &pending](int done, int total) {
         chunkProgressDoneCount = done;
@@ -274,7 +354,30 @@ void tryUpload() {
         uiDrawnThisUpload = true;
       });
 
-  uploader.disconnect();
+  // Leave WiFi associated while USB is connected so the next periodic
+  // upload retry (or "Upload now") skips the reconnect/handshake cost -
+  // there's no battery cost to justify tearing it down while powered.
+  if (!isUsbConnected()) uploader.disconnect();
+
+  // uploadAllPending() leaves any file that failed (server unreachable,
+  // rejected it, etc) still marked pending for the next retry - so a run
+  // where nothing actually succeeded isn't a completion, it's the same
+  // stuck files being retried again. Only chime/report success when at
+  // least one file really moved to /uploaded; otherwise treat it like the
+  // Wi-Fi-offline case below instead of announcing an upload that didn't
+  // happen.
+  if (uploadedCount == 0) {
+    Sounds::error();
+    if (screenOn) {
+      ui.showStatus(Severity::kWarn, "Upload failed",
+                    {"Recording still saves to SD.", "", "Will retry automatically."},
+                    "ok", false);
+      delay(1500);
+    }
+    goIdle();
+    return;
+  }
+
   Sounds::uploadComplete();
 
   // If the screen is off, there's no one to show the result to - go
@@ -293,7 +396,6 @@ void tryUpload() {
   // about giving the user a moment to see the upload actually finished
   // before it disappears, and something to acknowledge (G11 back) rather
   // than auto-dismissing.
-  int uploadedCount = (int)pending.size();
   char buf[24];
   snprintf(buf, sizeof(buf), "%d file%s uploaded", uploadedCount, uploadedCount == 1 ? "" : "s");
   ui.showStatus(Severity::kGood, "Upload complete", {buf}, "back", false);
@@ -374,7 +476,7 @@ void clearAllRecordings() {
   snprintf(buf, sizeof(buf), "%d recording(s) deleted", count);
   ui.showStatus(Severity::kGood, "Storage cleared", {buf}, "back", false);
   state = State::INFO;
-  infoReturnsToStorage = true;
+  infoReturnTo = InfoReturnTo::kStorageMenu;
   menuLastActivityMs = millis();
 }
 
@@ -391,6 +493,8 @@ void showAboutScreen() {
   ui.showInfo("ABOUT", lines, Glyph::kInfo);
 }
 
+void enterNetworkMenu();  // defined below; used here and by the INFO state's back-navigation
+
 // Executes the currently-selected menu item, then decides what state comes next.
 void runSelectedMenuItem() {
   String label = kMenuItems[menuSelectedIndex].label;
@@ -399,8 +503,8 @@ void runSelectedMenuItem() {
     enterPlaybackList();
     return;
   }
-  if (label == "Upload now") {
-    tryUpload();  // sets state internally (UPLOADING -> IDLE)
+  if (label == "Network") {
+    enterNetworkMenu();
     return;
   }
   if (label == "Exit") {
@@ -422,7 +526,7 @@ void runSelectedMenuItem() {
   // to the menu. Handled as a lightweight sub-loop so main.cpp's top-level
   // loop() doesn't need a state per info screen.
   state = State::INFO;
-  infoReturnsToStorage = false;
+  infoReturnTo = InfoReturnTo::kMainMenu;
   if (label == "About") showAboutScreen();
 }
 
@@ -431,12 +535,137 @@ void runSelectedStorageMenuItem() {
   String label = kStorageMenuItems[storageMenuSelectedIndex].label;
   if (label == "Storage info") {
     state = State::INFO;
-    infoReturnsToStorage = true;
+    infoReturnTo = InfoReturnTo::kStorageMenu;
     showStorageInfoScreen();
     return;
   }
   if (label == "Clear recordings") {
     clearAllRecordings();
+    return;
+  }
+  // "Back"
+  enterMenu();
+}
+
+// Connects using the given ssid/password, showing a good/warn showStatus()
+// result screen either way - same pattern as tryUpload()'s WiFi-offline
+// screen. "back" on the result screen returns to the Network submenu.
+void connectAndReport(const String &ssid, const String &password) {
+  ui.showMessage("Connecting...", {ssid});
+  bool ok = uploader.connect(ssid, password);
+  if (ok) {
+    Sounds::recordEnd();
+    ui.showStatus(Severity::kGood, "Connected", {ssid}, "back", false);
+  } else {
+    Sounds::error();
+    ui.showStatus(Severity::kWarn, "Couldn't connect", {"Check the password", "and try again."}, "back", false);
+  }
+  state = State::INFO;
+  infoReturnTo = InfoReturnTo::kNetworkMenu;
+  menuLastActivityMs = millis();
+}
+
+void enterNetworkMenu() {
+  networkMenuSelectedIndex = 0;
+  menuLastActivityMs = millis();
+  state = State::NETWORK_MENU;
+  ui.showMenu(kNetworkMenuItems, networkMenuSelectedIndex);
+}
+
+void enterNetworkList() {
+  ui.showMessage("Scanning...", {});
+  uploader.scanNetworks(networkScanList);
+  networkScanSaved.clear();
+  for (auto &ssid : networkScanList) {
+    String pass;
+    networkScanSaved.push_back(wifiStore.findPassword(ssid, pass));
+  }
+  networkListSelectedIndex = 0;
+  networkListActivityMs = millis();
+  state = State::NETWORK_LIST;
+  ui.showNetworkList(networkScanList, networkListSelectedIndex, networkScanSaved);
+}
+
+void enterPasswordKeyboard(const String &ssid) {
+  kbPendingSsid = ssid;
+  kbText = "";
+  kbShift = false;
+  kbCol = 0;
+  kbRow = 0;
+  state = State::NETWORK_KEYBOARD;
+  ui.showKeyboard("PASSWORD", kbText, true, kbShift, kbCol, kbRow);
+}
+
+// G11/select on the currently-highlighted scanned network: connect
+// immediately with a saved password, otherwise prompt for one.
+void runSelectedNetworkListItem() {
+  if (networkScanList.empty()) return;
+  String ssid = networkScanList[networkListSelectedIndex];
+  String pass;
+  if (wifiStore.findPassword(ssid, pass)) {
+    connectAndReport(ssid, pass);
+    return;
+  }
+  enterPasswordKeyboard(ssid);
+}
+
+// Called when OK is selected on the password keyboard: connects with the
+// typed password and - only on success - saves it as the new preferred
+// network (a wrong password shouldn't get remembered).
+void submitKeyboardPassword() {
+  bool ok = uploader.connect(kbPendingSsid, kbText);
+  if (ok) {
+    wifiStore.save(kbPendingSsid, kbText);
+    Sounds::recordEnd();
+    ui.showStatus(Severity::kGood, "Connected", {kbPendingSsid}, "back", false);
+  } else {
+    Sounds::error();
+    ui.showStatus(Severity::kWarn, "Couldn't connect", {"Check the password", "and try again."}, "back", false);
+  }
+  state = State::INFO;
+  infoReturnTo = InfoReturnTo::kNetworkMenu;
+  menuLastActivityMs = millis();
+}
+
+// Executes the currently-selected item in the Network submenu.
+void runSelectedNetworkMenuItem() {
+  String label = kNetworkMenuItems[networkMenuSelectedIndex].label;
+  if (label == "WiFi") {
+    String ssid = wifiStore.preferredSsid();
+    if (!ssid.length()) {
+      ui.showStatus(Severity::kWarn, "No saved network", {"Use \"Add new WiFi\"", "to connect first."}, "back", false);
+      state = State::INFO;
+      infoReturnTo = InfoReturnTo::kNetworkMenu;
+      menuLastActivityMs = millis();
+      return;
+    }
+    String pass;
+    wifiStore.findPassword(ssid, pass);
+    connectAndReport(ssid, pass);
+    return;
+  }
+  if (label == "Add new WiFi") {
+    enterNetworkList();
+    return;
+  }
+  if (label == "Upload now") {
+    tryUpload();  // sets state internally (UPLOADING -> IDLE)
+    return;
+  }
+  if (label == "Disconnect") {
+    uploader.disconnect();
+    ui.showStatus(Severity::kInfo, "Disconnected", {}, "back", false);
+    state = State::INFO;
+    infoReturnTo = InfoReturnTo::kNetworkMenu;
+    menuLastActivityMs = millis();
+    return;
+  }
+  if (label == "Clear WiFis") {
+    wifiStore.clear();
+    ui.showStatus(Severity::kGood, "WiFi networks cleared", {}, "back", false);
+    state = State::INFO;
+    infoReturnTo = InfoReturnTo::kNetworkMenu;
+    menuLastActivityMs = millis();
     return;
   }
   // "Back"
@@ -467,7 +696,7 @@ void setup() {
   // Best-effort: no RTC chip on this board, so get wall-clock time from
   // NTP if WiFi is reachable. Recording still works if this fails/times
   // out - filenameTimestamp() falls back to a millis()-based name.
-  if (uploader.connect()) {
+  if (connectPreferredOrDefault()) {
     ui.bootLog("Wi-Fi connected", Severity::kGood);
     bool synced = clock_.sync();
     ui.bootLog(synced ? "Clock synced" : "Clock sync failed", synced ? Severity::kGood : Severity::kWarn);
@@ -538,7 +767,7 @@ void loop() {
     }
   }
   bool blankableState = (state == State::IDLE || state == State::RECORDING);
-  if (blankableState && screenOn && (millis() - lastActivityMs > SCREEN_TIMEOUT_MS)) {
+  if (blankableState && screenOn && !isUsbConnected() && (millis() - lastActivityMs > SCREEN_TIMEOUT_MS)) {
     screenOn = false;
     M5.Lcd.sleep();
   }
@@ -607,6 +836,9 @@ void loop() {
         lastUploadAttemptMs = millis();
         tryUpload();
       }
+      if (!isUsbConnected() && (millis() - lastActivityMs > SLEEP_TIMEOUT_MS)) {
+        enterLightSleep();
+      }
       break;
     }
 
@@ -659,11 +891,12 @@ void loop() {
 
     case State::INFO: {
       // G11 from an info screen goes back to whichever menu it was opened
-      // from (main menu, or the Storage submenu); anything else (or a
-      // timeout) also bails out to keep the UI from ever feeling stuck on
-      // one screen.
+      // from (main menu, Storage submenu, or Network submenu); anything else
+      // (or a timeout) also bails out to keep the UI from ever feeling stuck
+      // on one screen.
       if (select || nav) {
-        if (infoReturnsToStorage) enterStorageMenu();
+        if (infoReturnTo == InfoReturnTo::kStorageMenu) enterStorageMenu();
+        else if (infoReturnTo == InfoReturnTo::kNetworkMenu) enterNetworkMenu();
         else enterMenu();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();
@@ -688,6 +921,99 @@ void loop() {
         enterMenu();
       } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();
+      }
+      break;
+    }
+
+    case State::NETWORK_MENU: {
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
+        int count = (int)kNetworkMenuItems.size();
+        networkMenuSelectedIndex = menuStepBack
+                                        ? (networkMenuSelectedIndex + count - 1) % count
+                                        : (networkMenuSelectedIndex + 1) % count;
+        menuLastActivityMs = millis();
+        ui.showMenu(kNetworkMenuItems, networkMenuSelectedIndex);
+      } else if (select) {
+        // G11 (or encoder click): select the highlighted item.
+        menuLastActivityMs = millis();
+        runSelectedNetworkMenuItem();
+      } else if (shakeBack) {
+        enterMenu();
+      } else if (millis() - menuLastActivityMs > MENU_IDLE_TIMEOUT_MS) {
+        goIdle();
+      }
+      break;
+    }
+
+    case State::NETWORK_LIST: {
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
+        if (!networkScanList.empty()) {
+          int count = (int)networkScanList.size();
+          networkListSelectedIndex = menuStepBack
+                                          ? (networkListSelectedIndex + count - 1) % count
+                                          : (networkListSelectedIndex + 1) % count;
+        }
+        networkListActivityMs = millis();
+        ui.showNetworkList(networkScanList, networkListSelectedIndex, networkScanSaved);
+      } else if (select) {
+        // G11 (or encoder click): connect to (or prompt a password for) the highlighted network.
+        networkListActivityMs = millis();
+        runSelectedNetworkListItem();
+      } else if (shakeBack) {
+        enterNetworkMenu();
+      } else if (millis() - networkListActivityMs > MENU_IDLE_TIMEOUT_MS) {
+        goIdle();
+      }
+      break;
+    }
+
+    case State::NETWORK_KEYBOARD: {
+      // nav/menuStepBack move the cursor cell-by-cell through the grid,
+      // wrapping row-to-row (matching Bruce's generalKeyboard() NEXT/PREV
+      // behavior) rather than a 1D index, since the keyboard is a genuine
+      // 2D layout. The action row (SPACE/OK/CANCEL) has only 3 columns, so
+      // entering/leaving it clamps col instead of reusing kKeyCols.
+      if (nav) {
+        int maxCol = (kbRow == UiDisplay::kActionRow) ? 2 : (UiDisplay::kKeyCols - 1);
+        if (menuStepBack) {
+          kbCol--;
+          if (kbCol < 0) {
+            kbRow = (kbRow <= 0) ? UiDisplay::kActionRow : kbRow - 1;
+            kbCol = (kbRow == UiDisplay::kActionRow) ? 2 : (UiDisplay::kKeyCols - 1);
+          }
+        } else {
+          kbCol++;
+          if (kbCol > maxCol) {
+            kbCol = 0;
+            kbRow = (kbRow >= UiDisplay::kActionRow) ? 0 : kbRow + 1;
+          }
+        }
+        ui.showKeyboard("PASSWORD", kbText, true, kbShift, kbCol, kbRow);
+      } else if (select) {
+        if (kbRow == UiDisplay::kActionRow) {
+          if (kbCol == 0) {  // SPACE
+            kbText += ' ';
+            ui.showKeyboard("PASSWORD", kbText, true, kbShift, kbCol, kbRow);
+          } else if (kbCol == 1) {  // OK
+            submitKeyboardPassword();
+          } else {  // CANCEL
+            enterNetworkList();
+          }
+        } else {
+          char k = ui.keyAt(kbRow, kbCol, kbShift);
+          if (k == UiDisplay::kKeyShift) {
+            kbShift = !kbShift;
+          } else if (k == UiDisplay::kKeyBackspace) {
+            if (kbText.length()) kbText.remove(kbText.length() - 1);
+          } else if (k) {
+            kbText += k;
+          }
+          ui.showKeyboard("PASSWORD", kbText, true, kbShift, kbCol, kbRow);
+        }
+      } else if (shakeBack) {
+        enterNetworkList();
       }
       break;
     }
