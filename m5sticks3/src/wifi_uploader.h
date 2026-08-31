@@ -175,8 +175,7 @@ class WifiUploader {
     int done = 0;
     int succeeded = 0;
     for (auto &path : files) {
-      if (uploadFile(path, onChunkProgress)) {
-        moveToUploaded(path);
+      if (uploadFile(path, onChunkProgress) && moveToUploaded(path)) {
         succeeded++;
       }
       done++;
@@ -192,12 +191,22 @@ class WifiUploader {
   }
 
   // Moves a successfully-uploaded recording into /uploaded so it won't be
-  // picked up by pendingFiles() again.
-  static void moveToUploaded(const String &wavPath) {
-    if (!SD.exists("/uploaded")) SD.mkdir("/uploaded");
+  // picked up by pendingFiles() again. Returns false if the move didn't
+  // actually happen (caller should then leave the file pending rather than
+  // reporting a success that a silent rename failure would otherwise hide -
+  // pendingFiles() would just pick it back up and re-upload it anyway).
+  static bool moveToUploaded(const String &wavPath) {
+    if (!SD.exists("/uploaded") && !SD.mkdir("/uploaded")) {
+      Serial.println("moveToUploaded: mkdir /uploaded failed");
+      return false;
+    }
     String dest = "/uploaded/" + baseName(wavPath);
     SD.remove(dest);  // rename() fails if the destination already exists
-    SD.rename(wavPath, dest);
+    if (!SD.rename(wavPath, dest)) {
+      Serial.println("moveToUploaded: rename failed for " + wavPath);
+      return false;
+    }
+    return true;
   }
 
   bool parseUrl(String &host, int &port, String &reqPath, bool &useTls) {
