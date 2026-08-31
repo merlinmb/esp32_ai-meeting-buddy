@@ -303,10 +303,10 @@ class UiDisplay {
     drawFooter(onBackRow ? "back" : "play", false, "next", true);
   }
 
-  // List of scanned WiFi networks to choose to connect to. Same
-  // scroll-a-window-around-the-selection shape as showRecordingList(), with
-  // a small dot prefix on rows whose password is already saved so the user
-  // can tell a rescan-and-reselect will skip the password prompt.
+  // List of scanned WiFi networks to choose to connect to. Top-aligned, same
+  // fixed-row-count shape as showMenu(), with a small dot prefix on rows
+  // whose password is already saved so the user can tell a rescan-and-reselect
+  // will skip the password prompt.
   void showNetworkList(const std::vector<String> &ssids, int selectedIndex, const std::vector<bool> &saved) {
     M5.Lcd.fillScreen(_bg);
     drawGlyph(Glyph::kWifi, 22, 20, -1, -1, 10);
@@ -315,25 +315,21 @@ class UiDisplay {
     if (ssids.empty()) {
       centerText("No networks found", 100, _muted, kScaleBody);
     } else {
-      const int kVisible = 6;
-      int start = selectedIndex - kVisible / 2;
-      if (start < 0) start = 0;
-      if (start > (int)ssids.size() - kVisible) start = max(0, (int)ssids.size() - kVisible);
-
       int top = 34, bottom = reserveFooter();
-      int shown = min((int)ssids.size() - start, kVisible);
-      int step = shown ? (bottom - top) / shown : 0;
+      size_t count = ssids.size();
+      int step = (bottom - top) / (int)max(count, (size_t)kStandardMenuRowCount);
       int rowH = min(step - 4, 30);
+      if (rowH < 14) rowH = min(step - 2, step);  // degrade gracefully for a very long list
 
       int y = top;
-      for (int i = start; i < (int)ssids.size() && i < start + kVisible; i++) {
-        bool sel = (i == selectedIndex);
+      for (size_t i = 0; i < count; i++) {
+        bool sel = ((int)i == selectedIndex);
         uint16_t fg = sel ? _bg : _text;
         uint16_t rowBg = sel ? _accent : _bg;
         if (sel) {
           M5.Lcd.fillRoundRect(6, y, _w - 12, rowH, 6, _accent);
         }
-        String label = (i < (int)saved.size() && saved[i]) ? "* " + ssids[i] : ssids[i];
+        String label = (i < saved.size() && saved[i]) ? "* " + ssids[i] : ssids[i];
         leftText(label, 14, y + rowH / 2 - 4, fg, kScaleBody, rowBg);
         y += step;
       }

@@ -57,7 +57,11 @@ class WifiUploader {
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
       delay(200);
     }
-    return WiFi.status() == WL_CONNECTED;
+    bool connected = WiFi.status() == WL_CONNECTED;
+    if (connected) {
+      Serial.println("WiFi IP: " + WiFi.localIP().toString());
+    }
+    return connected;
   }
 
   void disconnect() {

@@ -44,7 +44,7 @@
 #include "web_server.h"
 
 enum class State { IDLE, RECORDING, UPLOADING, MENU, INFO, PLAYBACK_LIST, PLAYING, STORAGE_MENU,
-                    NETWORK_MENU, NETWORK_LIST, NETWORK_KEYBOARD };
+                    NETWORK_MENU, NETWORK_LIST, SAVED_NETWORK_LIST, NETWORK_KEYBOARD };
 
 static State state = State::IDLE;
 
@@ -163,6 +163,10 @@ static std::vector<String> networkScanList;
 static std::vector<bool> networkScanSaved;
 static int networkListSelectedIndex = 0;
 static unsigned long networkListActivityMs = 0;
+
+static std::vector<SavedNetwork> savedNetworkList;
+static int savedNetworkSelectedIndex = 0;
+static unsigned long savedNetworkActivityMs = 0;
 
 // Keyboard cursor: (col,row), with row == UiDisplay's kActionRow meaning the
 // SPACE/OK/CANCEL row (col clamped to 0..2 there instead of 0..kKeyCols-1).
@@ -514,7 +518,12 @@ void showAboutScreen() {
   snprintf(buf, sizeof(buf), "Battery: %d%%", readBatteryPercent());
   lines.push_back(buf);
   lines.push_back(sdOk ? "SD card: OK" : "SD card: missing");
-  lines.push_back(WiFi.status() == WL_CONNECTED ? "Wi-Fi: connected" : "Wi-Fi: offline");
+  if (WiFi.status() == WL_CONNECTED) {
+    lines.push_back("Wi-Fi: connected");
+    lines.push_back(WiFi.localIP().toString());
+  } else {
+    lines.push_back("Wi-Fi: offline");
+  }
   ui.showInfo("ABOUT", lines, Glyph::kInfo);
 }
 
@@ -580,7 +589,7 @@ void connectAndReport(const String &ssid, const String &password) {
   bool ok = uploader.connect(ssid, password);
   if (ok) {
     Sounds::recordEnd();
-    ui.showStatus(Severity::kGood, "Connected", {ssid}, "back", false);
+    ui.showStatus(Severity::kGood, "Connected", {ssid}, "back", false, 1);  // kScaleBody - default kScaleLabel wraps mid-word on the 135px-wide screen
   } else {
     Sounds::error();
     ui.showStatus(Severity::kWarn, "Couldn't connect", {"Check the password", "and try again."}, "back", false);
@@ -609,6 +618,26 @@ void enterNetworkList() {
   networkListActivityMs = millis();
   state = State::NETWORK_LIST;
   ui.showNetworkList(networkScanList, networkListSelectedIndex, networkScanSaved);
+}
+
+// Shows the list of saved WiFi networks (SSID + password already known) to
+// pick which one to connect to - separate from enterNetworkList() (a fresh
+// scan of nearby APs) since this needs no scan and connects immediately on
+// select rather than falling through to the password keyboard.
+void enterSavedNetworkList() {
+  savedNetworkList = wifiStore.load();
+  savedNetworkSelectedIndex = 0;
+  savedNetworkActivityMs = millis();
+  state = State::SAVED_NETWORK_LIST;
+  std::vector<String> ssids;
+  for (auto &n : savedNetworkList) ssids.push_back(n.ssid);
+  ui.showNetworkList(ssids, savedNetworkSelectedIndex, {});
+}
+
+void runSelectedSavedNetworkListItem() {
+  if (savedNetworkList.empty()) return;
+  SavedNetwork &n = savedNetworkList[savedNetworkSelectedIndex];
+  connectAndReport(n.ssid, n.password);
 }
 
 void enterPasswordKeyboard(const String &ssid) {
@@ -642,7 +671,7 @@ void submitKeyboardPassword() {
   if (ok) {
     wifiStore.save(kbPendingSsid, kbText);
     Sounds::recordEnd();
-    ui.showStatus(Severity::kGood, "Connected", {kbPendingSsid}, "back", false);
+    ui.showStatus(Severity::kGood, "Connected", {kbPendingSsid}, "back", false, 1);  // kScaleBody - default kScaleLabel wraps mid-word on the 135px-wide screen
   } else {
     Sounds::error();
     ui.showStatus(Severity::kWarn, "Couldn't connect", {"Check the password", "and try again."}, "back", false);
@@ -656,19 +685,15 @@ void submitKeyboardPassword() {
 void runSelectedNetworkMenuItem() {
   String label = kNetworkMenuItems[networkMenuSelectedIndex].label;
   if (label == "Connect") {
-    // Same fallback as connectPreferredOrDefault(): prefer the last-saved
-    // network, but if nothing's been saved via the menu yet, fall back to
-    // config.h's WIFI_SSID/WIFI_PASSWORD instead of refusing to connect -
-    // those are a real usable network, not just a boot-time default.
-    String ssid = wifiStore.preferredSsid();
-    String pass;
-    if (ssid.length()) {
-      wifiStore.findPassword(ssid, pass);
+    // Let the user pick which saved network to connect to. If nothing's
+    // been saved via the menu yet, fall back to config.h's
+    // WIFI_SSID/WIFI_PASSWORD instead of showing an empty list - that's a
+    // real usable network, not just a boot-time default.
+    if (!wifiStore.load().empty()) {
+      enterSavedNetworkList();
     } else {
-      ssid = WIFI_SSID;
-      pass = WIFI_PASSWORD;
+      connectAndReport(WIFI_SSID, WIFI_PASSWORD);
     }
-    connectAndReport(ssid, pass);
     return;
   }
   if (label == "Add new WiFi") {
@@ -681,7 +706,7 @@ void runSelectedNetworkMenuItem() {
   }
   if (label == "Disconnect") {
     uploader.disconnect();
-    ui.showStatus(Severity::kInfo, "Disconnected", {}, "back", false);
+    ui.showStatus(Severity::kInfo, "Disconnected", {}, "back", false, 1);  // kScaleBody - default kScaleLabel wraps mid-word on the 135px-wide screen
     state = State::INFO;
     infoReturnTo = InfoReturnTo::kNetworkMenu;
     menuLastActivityMs = millis();
@@ -1000,6 +1025,31 @@ void loop() {
       } else if (shakeBack) {
         enterNetworkMenu();
       } else if (millis() - networkListActivityMs > MENU_IDLE_TIMEOUT_MS) {
+        goIdle();
+      }
+      break;
+    }
+
+    case State::SAVED_NETWORK_LIST: {
+      if (nav) {
+        // G12 (or encoder rotation): move the highlight only.
+        if (!savedNetworkList.empty()) {
+          int count = (int)savedNetworkList.size();
+          savedNetworkSelectedIndex = menuStepBack
+                                           ? (savedNetworkSelectedIndex + count - 1) % count
+                                           : (savedNetworkSelectedIndex + 1) % count;
+        }
+        savedNetworkActivityMs = millis();
+        std::vector<String> ssids;
+        for (auto &n : savedNetworkList) ssids.push_back(n.ssid);
+        ui.showNetworkList(ssids, savedNetworkSelectedIndex, {});
+      } else if (select) {
+        // G11 (or encoder click): connect to the highlighted saved network.
+        savedNetworkActivityMs = millis();
+        runSelectedSavedNetworkListItem();
+      } else if (shakeBack) {
+        enterNetworkMenu();
+      } else if (millis() - savedNetworkActivityMs > MENU_IDLE_TIMEOUT_MS) {
         goIdle();
       }
       break;
