@@ -343,7 +343,7 @@ void tryUpload() {
   // (see the screenOn check at the end of this function).
   bool uiDrawnThisUpload = false;
   if (screenOn) {
-    ui.showUploading(0, (int)pending.size(), true);
+    ui.showUploading(0, 0, (int)pending.size(), true);
     uiDrawnThisUpload = true;
   }
 
@@ -360,20 +360,22 @@ void tryUpload() {
   }
 
   int chunkProgressDoneCount = 0;
+  int chunkProgressSucceededCount = 0;
   int uploadedCount = uploader.uploadAllPending(
       pending,
-      [&chunkProgressDoneCount, &uiDrawnThisUpload, &pending](int done, int total) {
+      [&chunkProgressDoneCount, &chunkProgressSucceededCount, &uiDrawnThisUpload, &pending](int done, int succeeded, int total) {
         chunkProgressDoneCount = done;
+        chunkProgressSucceededCount = succeeded;
         if (!screenOn) return;
-        ui.showUploading(done, total, !uiDrawnThisUpload);
+        ui.showUploading(done, succeeded, total, !uiDrawnThisUpload);
         uiDrawnThisUpload = true;
       },
-      [&pending, &chunkProgressDoneCount, &uiDrawnThisUpload](size_t sentBytes, size_t fileSize) {
+      [&pending, &chunkProgressDoneCount, &chunkProgressSucceededCount, &uiDrawnThisUpload](size_t sentBytes, size_t fileSize) {
         if (!screenOn) return;
-        // Uses the last-completed-file count so the bar's file-count text
+        // Uses the last-completed-file counts so the bar's file-count text
         // stays correct while its fill advances mid-file.
         float fraction = fileSize > 0 ? (float)sentBytes / (float)fileSize : 0.0f;
-        ui.showUploading(chunkProgressDoneCount, (int)pending.size(), !uiDrawnThisUpload, fraction);
+        ui.showUploading(chunkProgressDoneCount, chunkProgressSucceededCount, (int)pending.size(), !uiDrawnThisUpload, fraction);
         uiDrawnThisUpload = true;
       });
 

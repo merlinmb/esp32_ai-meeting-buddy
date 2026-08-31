@@ -111,10 +111,14 @@ class WifiUploader {
     probe.close();
 
     String fileName = baseName(path);
+    Serial.println("uploadFile: " + fileName + " (" + String((unsigned)fileSize) + " bytes)");
 
     Session session;
     long resumeFrom = queryResumeOffset(session, host, port, reqPath, fileName, useTls);
-    if (resumeFrom < 0) resumeFrom = 0;  // couldn't ask - start from 0, a 409 will correct us if that's wrong
+    if (resumeFrom < 0) {
+      Serial.println("uploadFile: status query failed, starting from 0");
+      resumeFrom = 0;  // couldn't ask - start from 0, a 409 will correct us if that's wrong
+    }
     if ((size_t)resumeFrom >= fileSize) { session.close(); return true; }  // server already has it all
 
     File f = SD.open(path, FILE_READ);
@@ -153,7 +157,14 @@ class WifiUploader {
       }
 
       consecutiveFailures++;
-      if (consecutiveFailures > UPLOAD_MAX_RETRIES) { ok = false; break; }
+      Serial.println("uploadFile: chunk at offset " + String((unsigned)offset) + " failed (sent=" +
+                     String(sent) + " status=" + String(statusCode) + " serverBytes=" + String(serverBytes) +
+                     "), attempt " + String(consecutiveFailures) + "/" + String((int)UPLOAD_MAX_RETRIES));
+      if (consecutiveFailures > UPLOAD_MAX_RETRIES) {
+        Serial.println("uploadFile: giving up on " + fileName + " after " + String(consecutiveFailures) + " consecutive failures");
+        ok = false;
+        break;
+      }
       delay(UPLOAD_RETRY_BACKOFF_MS);
     }
 
@@ -162,15 +173,17 @@ class WifiUploader {
     return ok;
   }
 
-  // Uploads every pending file; calls onProgress(doneCount, total) after each
-  // file finishes, and onChunkProgress(sentBytes, fileSize) as each chunk of
-  // the current file is sent, so a single large/slow file still shows the
-  // transfer advancing instead of sitting static until it completes.
+  // Uploads every pending file; calls onProgress(doneCount, succeededCount,
+  // total) after each file finishes, and onChunkProgress(sentBytes, fileSize)
+  // as each chunk of the current file is sent, so a single large/slow file
+  // still shows the transfer advancing instead of sitting static until it
+  // completes. doneCount is attempts, not successes - callers that want to
+  // show failures distinctly should compare it against succeededCount.
   // Returns how many files actually succeeded (moved to /uploaded) - a file
   // that fails (server unreachable/rejects it) is left pending for the next
   // retry rather than counted, so callers can tell a real success from a
   // no-op retry that just re-attempted the same stuck files.
-  int uploadAllPending(std::vector<String> &files, std::function<void(int, int)> onProgress = nullptr,
+  int uploadAllPending(std::vector<String> &files, std::function<void(int, int, int)> onProgress = nullptr,
                        std::function<void(size_t, size_t)> onChunkProgress = nullptr) {
     int done = 0;
     int succeeded = 0;
@@ -179,7 +192,7 @@ class WifiUploader {
         succeeded++;
       }
       done++;
-      if (onProgress) onProgress(done, (int)files.size());
+      if (onProgress) onProgress(done, succeeded, (int)files.size());
     }
     return succeeded;
   }
@@ -375,7 +388,10 @@ class WifiUploader {
   bool sendChunk(Session &session, const String &host, int port, const String &reqPath, const String &fileName,
                 File &f, size_t offset, size_t len, bool isFinal, bool useTls, int &statusCode,
                 long &serverBytesReceived, bool &complete) {
-    if (!session.ensureOpen(host, port, useTls)) return false;
+    if (!session.ensureOpen(host, port, useTls)) {
+      Serial.println("sendChunk: connect failed");
+      return false;
+    }
     WiFiClient &client = *session.client;
 
     String path = reqPath + "/chunk";
@@ -415,13 +431,21 @@ class WifiUploader {
       yield();  // let WiFi/lwIP and the watchdog run between buffers
     }
 
-    if (!streamOk) { session.close(); return false; }
+    if (!streamOk) {
+      Serial.println("sendChunk: stream stalled/dropped at " + String((unsigned)sentBytes) + "/" +
+                     String((unsigned)len) + " bytes into chunk");
+      session.close();
+      return false;
+    }
 
     String body;
     bool keepAlive = false;
     bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body, keepAlive);
     if (!keepAlive) session.close();
-    if (!ok) return false;
+    if (!ok) {
+      Serial.println("sendChunk: no valid HTTP response (timeout/disconnect)");
+      return false;
+    }
 
     // Body is "<bytesReceived>" or "<bytesReceived> COMPLETE"; toInt() reads
     // the leading digits and ignores the trailing marker either way.

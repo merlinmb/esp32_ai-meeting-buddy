@@ -158,7 +158,7 @@ class UiDisplay {
   // fileFraction is the current (not-yet-counted) file's own send progress
   // (0..1) so the bar keeps moving while a single file is still in flight,
   // instead of sitting still until the whole file completes.
-  void showUploading(int doneCount, int totalCount, bool firstDraw, float fileFraction = 0.0f) {
+  void showUploading(int doneCount, int succeededCount, int totalCount, bool firstDraw, float fileFraction = 0.0f) {
     int barX = 14, barY = 120, barW = _w - 28, barH = 12;
 
     if (firstDraw) {
@@ -174,8 +174,13 @@ class UiDisplay {
       _upLastBarFillW = -1;
     }
 
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%d of %d file%s", doneCount, totalCount, totalCount == 1 ? "" : "s");
+    char buf[32];
+    int failedCount = doneCount - succeededCount;
+    if (failedCount > 0) {
+      snprintf(buf, sizeof(buf), "%d of %d (%d failed)", doneCount, totalCount, failedCount);
+    } else {
+      snprintf(buf, sizeof(buf), "%d of %d file%s", doneCount, totalCount, totalCount == 1 ? "" : "s");
+    }
     if (_upLastCountBuf != buf) {
       _upLastCountBuf = buf;
       M5.Lcd.fillRect(0, 84, _w, 12, _bg);  // erase old count text before drawing the new value
