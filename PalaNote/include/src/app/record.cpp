@@ -54,9 +54,16 @@ bool record() {
   f.write((uint8_t*)"data",4); f.write((uint8_t*)&dB,4);
   f.close();
 
+  const uint32_t minBytes = SAMPLE_RATE * 2 * 3; // 3 seconds of mono 16-bit audio
+  if (totalMono < minBytes) {
+    Serial.printf("[Rec] discarded (too short): %lu bytes\n", (unsigned long)totalMono);
+    SD_MMC.remove(path);
+    return false;
+  }
+
   lastRecNum = num;
   Serial.printf("[Rec] done: %lu bytes\n", (unsigned long)totalMono);
-  return totalMono > 1000;
+  return true;
 }
 
 bool playWavFile(const char* path) {
