@@ -96,15 +96,28 @@ static uint32_t lastRecordingSeconds = 0;
 // (see the SCREEN_TIMEOUT_MS handling in loop()) also wake the device from
 // light sleep. Unlike deep sleep, light sleep returns right here on wake
 // rather than restarting the program, so loop() picks back up normally.
-void enterLightSleep() {
+//
+// Also arms the SoC's own RTC timer (ESP32-S3 has one built in - no external
+// RTC chip needed, unlike the wall-clock time handled by ntp_clock.h) for
+// SLEEP_USB_CHECK_INTERVAL_MS, so a device left sleeping on battery still
+// wakes periodically to check for USB power and force a sync - see the
+// timer-wakeup handling in loop(). Returns true if a real button press woke
+// the device (vs. just the periodic timer), so the caller knows whether to
+// treat this like normal user activity.
+bool enterLightSleep() {
   gpio_wakeup_enable((gpio_num_t)PIN_RECORD_BUTTON, GPIO_INTR_LOW_LEVEL);
   gpio_wakeup_enable((gpio_num_t)PIN_NAV_BUTTON, GPIO_INTR_LOW_LEVEL);
   esp_sleep_enable_gpio_wakeup();
+  esp_sleep_enable_timer_wakeup(SLEEP_USB_CHECK_INTERVAL_MS * 1000ULL);
 
   M5.Power.lightSleep(M5.Power.sleep_no_timer, true);
 
+  bool wokeByButton = esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER;
+
   gpio_wakeup_disable((gpio_num_t)PIN_RECORD_BUTTON);
   gpio_wakeup_disable((gpio_num_t)PIN_NAV_BUTTON);
+
+  if (!wokeByButton) return false;
 
   lastActivityMs = millis();
   if (!screenOn) {
@@ -113,6 +126,7 @@ void enterLightSleep() {
     lastIdleRedrawMs = 0;
   }
   forceIdleRedraw = true;
+  return true;
 }
 // Set on entry into RECORDING so showRecording() draws its static chrome
 // once instead of every ~120ms redraw - see the RECORDING case in loop().
@@ -896,7 +910,18 @@ void loop() {
         tryUpload();
       }
       if (!isUsbConnected() && (millis() - lastActivityMs > SLEEP_TIMEOUT_MS)) {
-        enterLightSleep();
+        // A timer wakeup (no button pressed) means we're just checking in -
+        // if USB has since been connected, force a sync (silently, since the
+        // screen is asleep - tryUpload() already handles !screenOn cleanly)
+        // and stop resleeping; otherwise go straight back to sleep rather
+        // than treating this as real activity that should hold the device
+        // awake.
+        while (!enterLightSleep() && !isUsbConnected()) {
+        }
+        if (isUsbConnected()) {
+          tryUpload();
+          state = State::IDLE;
+        }
       }
       break;
     }

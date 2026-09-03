@@ -303,6 +303,23 @@
   .panel-search input:focus { border-color: var(--accent); }
   .panel-search input::placeholder { color: var(--text-faint); }
 
+  .tag-select {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 0.82rem;
+    outline: none;
+    cursor: pointer;
+  }
+  .tag-select:focus { border-color: var(--accent); }
+  .row-tag-select {
+    padding: 3px 6px;
+    font-size: 0.72rem;
+    max-width: 110px;
+  }
+
   .table-scroll { overflow: auto; flex: 1; min-height: 0; }
   table { width: 100%; border-collapse: collapse; }
   thead th {
@@ -372,6 +389,11 @@
     background: rgba(255, 180, 84, 0.14); color: var(--warn);
   }
   .badge.completed { background: rgba(63, 214, 148, 0.14); color: var(--ok); }
+  .badge.tag {
+    background: rgba(139, 123, 255, 0.14);
+    color: var(--accent);
+    font-weight: 500;
+  }
   .badge.failed { background: rgba(255, 92, 114, 0.14); color: var(--err); }
 
   .btn {
@@ -612,6 +634,41 @@
   #transcriptEditor:read-only { color: #b9bccb; background: var(--panel-2); }
   #transcriptEditor:read-only:focus { border-color: var(--border); }
 
+  .cards {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .info-card {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px 20px;
+  }
+  .info-card h3 {
+    margin: 0 0 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent-2);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .info-card p {
+    margin: 0;
+    color: #d7dae4;
+    line-height: 1.65;
+  }
+  .info-card ul {
+    margin: 0;
+    padding-left: 20px;
+    line-height: 1.7;
+  }
+  .info-card ul li { color: #d7dae4; }
+  .info-card ul li::marker { color: var(--text-faint); }
+
   .detail-toolbar {
     min-height: 18px;
     margin-bottom: 12px;
@@ -755,6 +812,9 @@
         <div class="panel-search">
           <input type="text" id="searchInput" placeholder="Search recordings...">
         </div>
+        <select class="tag-select" id="tagFilter" title="Filter by tag">
+          <option value="">All tags</option>
+        </select>
         <span class="count" id="count"></span>
       </div>
       <div class="table-scroll">
@@ -762,6 +822,7 @@
           <thead>
             <tr>
               <th>Meeting</th>
+              <th>Tag</th>
               <th class="col-secondary">Recorded</th>
               <th class="col-secondary">Received</th>
               <th>Uploaded</th>
@@ -796,6 +857,7 @@
       </header>
       <div class="email-bar" id="detailEmailBar" style="display:none">
         <button class="icon-btn" id="copyBtn" title="Copy transcript"><i class="fa-regular fa-copy"></i></button>
+        <button class="icon-btn" id="downloadRawBtn" title="Download this transcript"><i class="fa-solid fa-download"></i></button>
         <div class="email-icon"><i class="fa-solid fa-envelope"></i></div>
         <input type="email" id="emailTo" placeholder="Send transcript to email address...">
         <button class="btn primary" id="emailBtn">Send</button>
@@ -805,6 +867,7 @@
           <span class="detail-status" id="detailStatus"></span>
         </div>
         <textarea id="transcriptEditor">Loading...</textarea>
+        <div class="cards" id="detailCards"></div>
       </div>
     </div>
   </div>
@@ -846,6 +909,7 @@ let currentMeetingId = null;
 let saveTimer = null;
 let viewingRaw = false;
 let activeFilter = "all";
+let allTags = [];
 
 function setFilter(filter) {
   activeFilter = activeFilter === filter ? "all" : filter;
@@ -912,11 +976,24 @@ function timeAgo(iso) {
   return Math.floor(diff / 86400) + "d ago";
 }
 
+async function loadTags() {
+  const res = await fetch("/api/tags");
+  if (!res.ok) return;
+  allTags = await res.json();
+  const filter = document.getElementById("tagFilter");
+  const current = filter.value;
+  filter.innerHTML = `<option value="">All tags</option>` +
+    allTags.map(t => `<option value="${escapeAttr(t)}">${escapeHtml(t)}</option>`).join("");
+  filter.value = current;
+}
+
 async function fetchAll() {
   const query = document.getElementById("searchInput").value || "";
   const archivedParam = activeFilter === "archived" ? "&archived=1" : "";
+  const tagFilter = document.getElementById("tagFilter").value;
+  const tagParam = tagFilter ? "&tag=" + encodeURIComponent(tagFilter) : "";
   const [meetingsRes, statsRes] = await Promise.all([
-    fetch("/api/meetings?q=" + encodeURIComponent(query) + archivedParam),
+    fetch("/api/meetings?q=" + encodeURIComponent(query) + archivedParam + tagParam),
     fetch("/api/stats"),
   ]);
   if (meetingsRes.status === 401 || statsRes.status === 401) {
@@ -968,6 +1045,9 @@ function renderStats(stats) {
 }
 
 function renderTable() {
+  // The 5s poll calls this; re-rendering while the user has a row's tag
+  // dropdown open would close it mid-choice.
+  if (document.activeElement && document.activeElement.classList.contains("row-tag-select")) return;
   const rows = document.getElementById("rows");
   const table = document.getElementById("table");
   const empty = document.getElementById("empty");
@@ -981,7 +1061,8 @@ function renderTable() {
   if (filtered.length === 0) {
     table.style.display = "none";
     empty.style.display = "block";
-    empty.innerHTML = hasQuery
+    const hasTagFilter = !!document.getElementById("tagFilter").value;
+    empty.innerHTML = (hasQuery || hasTagFilter)
       ? `<div class="big"><i class="fa-solid fa-magnifying-glass"></i></div>No recordings match your search.`
       : `<div class="big"><i class="fa-solid fa-headphones-simple"></i></div>No recordings received yet.<br>Uploads from the device will show up here automatically.`;
     return;
@@ -998,6 +1079,12 @@ function renderTable() {
         <td class="name">
           ${escapeHtml(m.meeting_name)}
           <div class="sz">${fmtBytes(m.wav_bytes)}${fmtDuration(m.duration_seconds) ? " · " + fmtDuration(m.duration_seconds) : ""}</div>
+        </td>
+        <td>
+          <select class="tag-select row-tag-select" title="Change this recording's tag"
+                  onclick="event.stopPropagation()" onchange="setMeetingTag(${m.id}, this)">
+            ${allTags.map(t => `<option value="${escapeAttr(t)}" ${t === (m.tag || "Meeting") ? "selected" : ""}>${escapeHtml(t)}</option>`).join("")}
+          </select>
         </td>
         <td class="time col-secondary">${fmtRecordedAt(m.meeting_name)}</td>
         <td class="time col-secondary">${fmtTime(m.received_at)}</td>
@@ -1079,6 +1166,29 @@ async function retranscribeMeeting(id, btn) {
   await fetchAll();
 }
 
+async function setMeetingTag(id, select) {
+  const tag = select.value;
+  const previous = (allMeetings.find(x => x.id === id) || {}).tag || "Meeting";
+  try {
+    const res = await fetch(`/api/meetings/${id}/tag`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert("Could not change tag: " + (err.error || res.statusText));
+      select.value = previous;
+      return;
+    }
+  } catch (e) {
+    alert("Could not change tag: " + e);
+    select.value = previous;
+    return;
+  }
+  await fetchAll();
+}
+
 async function archiveMeeting(id) {
   if (!confirm("Archive this recording? It will be hidden from the active list.")) return;
   try {
@@ -1109,6 +1219,76 @@ async function unarchiveMeeting(id) {
   await fetchAll();
 }
 
+// Maps a "## Section title" heading (case-insensitive substring match) to an icon.
+const SECTION_ICONS = [
+  [/summary/i, "fa-solid fa-align-left"],
+  [/key point/i, "fa-solid fa-list-check"],
+  [/action item/i, "fa-solid fa-bolt"],
+  [/to ?do/i, "fa-solid fa-bolt"],
+  [/to buy/i, "fa-solid fa-cart-shopping"],
+  [/question/i, "fa-solid fa-circle-question"],
+  [/quote/i, "fa-solid fa-quote-left"],
+  [/idea/i, "fa-solid fa-lightbulb"],
+  [/open question/i, "fa-solid fa-circle-question"],
+  [/remember/i, "fa-solid fa-star"],
+  [/note/i, "fa-solid fa-note-sticky"],
+];
+
+function iconForSection(title) {
+  const hit = SECTION_ICONS.find(([re]) => re.test(title));
+  return hit ? hit[1] : "fa-solid fa-circle-dot";
+}
+
+// Splits cleaned markdown into "## heading" sections and drops the raw
+// transcript dump - that's available via the download/copy buttons instead.
+function parseMarkdownSections(markdown) {
+  const lines = markdown.split("\n");
+  const sections = [];
+  let current = null;
+  for (const line of lines) {
+    const heading = line.match(/^##\s+(.*)/);
+    if (heading) {
+      current = { title: heading[1].trim(), lines: [] };
+      sections.push(current);
+    } else if (line.match(/^#\s+/)) {
+      continue; // top-level "# Meeting name" title, already shown in the header
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  return sections.filter(s => !/cleaned transcript/i.test(s.title));
+}
+
+// Minimal inline markdown -> HTML for card bodies: bullet lists and plain
+// paragraphs only, matching the small set of constructs the LLM prompts ask for.
+function renderSectionBody(sectionLines) {
+  const text = sectionLines.join("\n").trim();
+  if (!text) return "";
+  const blocks = text.split(/\n\s*\n/);
+  return blocks.map(block => {
+    const items = block.split("\n").filter(l => l.trim());
+    if (items.every(l => /^[-*]\s+/.test(l.trim()))) {
+      return `<ul>${items.map(l => `<li>${escapeHtml(l.trim().replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
+    }
+    return `<p>${escapeHtml(block.trim()).replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+}
+
+function renderDetailCards(markdown) {
+  const container = document.getElementById("detailCards");
+  const sections = parseMarkdownSections(markdown);
+  if (!sections.length) {
+    container.innerHTML = `<div class="info-card"><p>${escapeHtml(markdown.trim()) || "No content."}</p></div>`;
+    return;
+  }
+  container.innerHTML = sections.map(s => `
+    <div class="info-card">
+      <h3><i class="${iconForSection(s.title)}"></i>${escapeHtml(s.title)}</h3>
+      ${renderSectionBody(s.lines)}
+    </div>
+  `).join("");
+}
+
 async function viewTranscript(id, name) {
   currentMeetingId = id;
   viewingRaw = false;
@@ -1125,9 +1305,11 @@ async function viewTranscript(id, name) {
   if (duration) parts.push(duration + " long");
   document.getElementById("detailRecorded").textContent = parts.join(" · ");
   const editor = document.getElementById("transcriptEditor");
+  const cards = document.getElementById("detailCards");
   const status = document.getElementById("detailStatus");
-  editor.value = "Loading...";
-  editor.readOnly = false;
+  editor.style.display = "none";
+  cards.style.display = "flex";
+  cards.innerHTML = `<div class="info-card"><p>Loading...</p></div>`;
   status.textContent = "";
   document.getElementById("emailTo").value = "";
   renderTable();
@@ -1135,9 +1317,10 @@ async function viewTranscript(id, name) {
   try {
     const res = await fetch(`/api/meetings/${id}/transcript`);
     const text = await res.text();
-    editor.value = text;
+    editor.value = text; // kept in sync (hidden) so copy/email still send the full markdown
+    renderDetailCards(text);
   } catch (e) {
-    editor.value = "Failed to load: " + e;
+    cards.innerHTML = `<div class="info-card"><p>Failed to load: ${escapeHtml(String(e))}</p></div>`;
   }
 }
 
@@ -1151,7 +1334,10 @@ async function viewRawTranscript(id, name) {
   document.getElementById("detailTitle").textContent = name;
   document.getElementById("detailRecorded").textContent = "Raw Whisper output · read-only";
   const editor = document.getElementById("transcriptEditor");
+  const cards = document.getElementById("detailCards");
   const status = document.getElementById("detailStatus");
+  cards.style.display = "none";
+  editor.style.display = "block";
   editor.value = "Loading...";
   editor.readOnly = true;
   status.textContent = "";
@@ -1309,6 +1495,14 @@ document.getElementById("copyBtn").onclick = async () => {
   }
 };
 
+document.getElementById("downloadRawBtn").onclick = () => {
+  if (currentMeetingId === null) return;
+  // Navigating rather than fetching keeps the session cookie on the request
+  // and lets the browser honour the Content-Disposition filename.
+  const endpoint = viewingRaw ? "raw_transcript/download" : "transcript/download";
+  window.location.href = `/api/meetings/${currentMeetingId}/${endpoint}`;
+};
+
 document.getElementById("emailBtn").onclick = async () => {
   const id = currentMeetingId;
   if (id === null) return;
@@ -1335,6 +1529,7 @@ document.getElementById("emailBtn").onclick = async () => {
 
 document.getElementById("detailClose").onclick = closeDetail;
 document.getElementById("searchInput").oninput = renderTable;
+document.getElementById("tagFilter").onchange = fetchAll;
 
 /* ---------- Recording ---------- */
 let mediaRecorder = null;
@@ -1423,7 +1618,7 @@ recordBtn.onclick = () => {
   }
 };
 
-fetchAll();
+loadTags().then(fetchAll);
 setInterval(fetchAll, 5000);
 </script>
 </body>

@@ -21,6 +21,15 @@
 // python -c "import secrets; print(secrets.token_urlsafe(32))"
 #define UPLOAD_TOKEN  "your-upload-token"
 
+// Tag applied to every recording this device uploads. The receiver uses the
+// tag to pick which set of instructions the LLM gets when it summarizes, so
+// "Meeting" produces meeting minutes while e.g. "Note" produces something
+// much shorter. Must be one of the tags the server knows (TAG_INSTRUCTIONS
+// in receive_and_transcribe.py): Meeting, Note, Idea, Interview, Personal, Work, Buy.
+// The server defaults to "Meeting" on its own if the tag call never lands,
+// so a failed tag request never costs you the recording.
+#define UPLOAD_TAG  "Meeting"
+
 // ---- Audio --------------------------------------------------------------
 #define SAMPLE_RATE_HZ   16000   // 16kHz mono is plenty for speech and keeps files small
 #define SAMPLE_BITS      16

@@ -6,3 +6,8 @@ server/venv
 server/venv/*
 server/__pycache__
 server/.env
+
+.pio
+*.log
+*.bak
+*.orig

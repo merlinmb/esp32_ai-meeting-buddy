@@ -131,6 +131,7 @@ class WifiUploader {
     size_t offset = (size_t)resumeFrom;
     int consecutiveFailures = 0;
     bool ok = true;
+    long meetingId = -1;  // set from the response that finalizes the file
     while (offset < fileSize) {
       size_t chunkLen = min((size_t)UPLOAD_CHUNK_BYTES, fileSize - offset);
       bool isFinal = (offset + chunkLen) >= fileSize;
@@ -138,8 +139,10 @@ class WifiUploader {
       long serverBytes = -1;
       bool complete = false;
       int statusCode = 0;
+      long chunkMeetingId = -1;
       bool sent = sendChunk(session, host, port, reqPath, fileName, f, offset, chunkLen, isFinal, useTls,
-                            statusCode, serverBytes, complete);
+                            statusCode, serverBytes, complete, chunkMeetingId);
+      if (chunkMeetingId >= 0) meetingId = chunkMeetingId;
 
       if (sent && statusCode == 200 && serverBytes == (long)(offset + chunkLen)) {
         offset += chunkLen;
@@ -173,6 +176,17 @@ class WifiUploader {
     }
 
     f.close();
+    // Tagging is a separate request to the receiver, deliberately after the
+    // upload rather than part of it: the WAV is already safely stored and
+    // queued at this point, so a failed tag call costs nothing more than the
+    // server's own default tag. Never let it turn a good upload into a
+    // failure the device would then retry from scratch.
+    if (ok && meetingId >= 0) {
+      if (!tagMeeting(session, host, port, useTls, meetingId, UPLOAD_TAG)) {
+        Serial.println("uploadFile: tagging meeting " + String(meetingId) + " as '" + String(UPLOAD_TAG) +
+                       "' failed - server keeps its default tag");
+      }
+    }
     session.close();
     return ok;
   }
@@ -384,6 +398,49 @@ class WifiUploader {
     return body.toInt();
   }
 
+  // POSTs the configured tag for a recording the server has just accepted.
+  // The endpoint lives beside /upload rather than under it, so this derives
+  // "/api/meetings/<id>/tag" from UPLOAD_SERVER_URL's path by dropping the
+  // trailing "/upload" - that way a server hosted under a sub-path still
+  // resolves correctly instead of assuming the API sits at the root.
+  bool tagMeeting(Session &session, const String &host, int port, bool useTls, long meetingId, const String &tag) {
+    if (!session.ensureOpen(host, port, useTls)) return false;
+    WiFiClient &client = *session.client;
+
+    String path = uploadPathPrefix() + "/api/meetings/" + String(meetingId) + "/tag";
+    String payload = "{\"tag\":\"" + tag + "\"}";
+
+    // One write() for headers+body - see the matching comment in queryResumeOffset().
+    String req = "POST " + path + " HTTP/1.1\r\n" +
+                "Host: " + host + "\r\n" +
+                "Content-Type: application/json\r\n" +
+                "Content-Length: " + String(payload.length()) + "\r\n" +
+                "X-Upload-Token: " + UPLOAD_TOKEN + "\r\n" +
+                "Connection: keep-alive\r\n\r\n" + payload;
+    client.write((const uint8_t *)req.c_str(), req.length());
+
+    int statusCode = 0;
+    String body;
+    bool keepAlive = false;
+    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body, keepAlive);
+    if (!keepAlive) session.close();
+    if (!ok || statusCode != 200) return false;
+    Serial.println("tagMeeting: meeting " + String(meetingId) + " tagged '" + tag + "'");
+    return true;
+  }
+
+  // UPLOAD_SERVER_URL's path with a trailing "/upload" removed, i.e. the
+  // prefix the receiver's other routes hang off. "" when it's served at the
+  // root, which is the usual case.
+  String uploadPathPrefix() {
+    String host, reqPath;
+    int port;
+    bool useTls;
+    if (!parseUrl(host, port, reqPath, useTls)) return "";
+    if (reqPath.endsWith("/upload")) return reqPath.substring(0, reqPath.length() - 7);
+    return "";
+  }
+
   // Sends [offset, offset+len) of the open file as one chunk POST. Returns
   // true whenever a well-formed HTTP response came back (including a 409
   // offset-mismatch - the caller resyncs to serverBytesReceived rather than
@@ -391,7 +448,7 @@ class WifiUploader {
   // back at all (dropped connection, stalled write, or timeout).
   bool sendChunk(Session &session, const String &host, int port, const String &reqPath, const String &fileName,
                 File &f, size_t offset, size_t len, bool isFinal, bool useTls, int &statusCode,
-                long &serverBytesReceived, bool &complete) {
+                long &serverBytesReceived, bool &complete, long &meetingId) {
     if (!session.ensureOpen(host, port, useTls)) {
       Serial.println("sendChunk: connect failed");
       return false;
@@ -451,10 +508,21 @@ class WifiUploader {
       return false;
     }
 
-    // Body is "<bytesReceived>" or "<bytesReceived> COMPLETE"; toInt() reads
-    // the leading digits and ignores the trailing marker either way.
-    complete = body.indexOf("COMPLETE") >= 0;
+    // Body is "<bytesReceived>", "<bytesReceived> COMPLETE", or
+    // "<bytesReceived> COMPLETE <meetingId>"; toInt() reads the leading
+    // digits and ignores whatever trails it in every case.
+    int completeIdx = body.indexOf("COMPLETE");
+    complete = completeIdx >= 0;
     serverBytesReceived = body.toInt();
+    // The id is only present on the response that finalizes the file, and
+    // only from a server new enough to send it - stays -1 otherwise, which
+    // tagMeeting() treats as "nothing to tag".
+    meetingId = -1;
+    if (complete) {
+      String trailer = body.substring(completeIdx + 8);
+      trailer.trim();
+      if (trailer.length() > 0) meetingId = trailer.toInt();
+    }
     return true;
   }
 };
