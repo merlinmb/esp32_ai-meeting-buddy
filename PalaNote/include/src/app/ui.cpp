@@ -283,6 +283,15 @@ void showRecording() {
   refresh();
 }
 
+void showRecordingLive(int battPercent, int sdFreePercent) {
+  clearWhite();
+  drawBatteryRing(battPercent);
+  drawStorageRing(sdFreePercent);
+  fillCircle(100, 100, 14, BLACK);
+  drawStrC(100, 139, "recording", 1, BLACK);
+  refresh();
+}
+
 void showSaved(int num) {
   clearWhite();
   drawCheckSmall(100, 46, BLACK);

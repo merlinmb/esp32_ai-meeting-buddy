@@ -128,6 +128,32 @@ void startRecordFlow() {
   showTagSelect(tagCursor);
 }
 
+void startToggleRecordFlow() {
+  state = STATE_RECORDING;
+
+  palaSoundSetEnabled(false);
+  bool recOk = recordToggle();
+  palaSoundSetEnabled(true);
+
+  if (!recOk) {
+    showError("REC FAIL");
+    delay(1600);
+    state = STATE_IDLE;
+    showIdle();
+    return;
+  }
+
+  soundSaved();
+
+  state = STATE_SAVED;
+  showSaved(lastRecNum);
+  delay(900);
+
+  tagCursor = min(2, max(tagCount - 1, 0));
+  state = STATE_TAG_SELECT;
+  showTagSelect(tagCursor);
+}
+
 void startSyncFlow() {
   const int MAX_TRIES = 20;
   showWifiConnecting(0, MAX_TRIES);

@@ -36,6 +36,7 @@ void drawListMenuCard(int y, const char* title, const char* meta, bool active);
 void showIdle();
 void showBatteryLow(int pct);
 void showRecording();
+void showRecordingLive(int battPercent, int sdFreePercent);
 void showSaved(int num);
 void showTagSelect(int cursor);
 void showMenu(int cursor);

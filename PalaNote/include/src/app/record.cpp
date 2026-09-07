@@ -7,6 +7,8 @@
 #include "esp_heap_caps.h"
 #include "notes.h"
 #include "../../sounds.h"
+#include "battery.h"
+#include "ui.h"
 
 extern "C" {
 #include "../../src/audio/audio_bsp.h"
@@ -38,6 +40,78 @@ bool record() {
     size_t written = f.write((uint8_t*)mbuf, mono*2);
     if (written == 0) break;
     totalMono += written;
+  }
+
+  heap_caps_free(sbuf); heap_caps_free(mbuf);
+
+  f.seek(0);
+  uint32_t dB=totalMono, fS=dB+36, bR=SAMPLE_RATE*2;
+  uint16_t bA=2,aF=1,ch=1,bps=16; uint32_t fL=16,sr=SAMPLE_RATE;
+  f.write((uint8_t*)"RIFF",4); f.write((uint8_t*)&fS,4);
+  f.write((uint8_t*)"WAVE",4); f.write((uint8_t*)"fmt ",4);
+  f.write((uint8_t*)&fL,4);   f.write((uint8_t*)&aF,2);
+  f.write((uint8_t*)&ch,2);   f.write((uint8_t*)&sr,4);
+  f.write((uint8_t*)&bR,4);   f.write((uint8_t*)&bA,2);
+  f.write((uint8_t*)&bps,2);
+  f.write((uint8_t*)"data",4); f.write((uint8_t*)&dB,4);
+  f.close();
+
+  const uint32_t minBytes = SAMPLE_RATE * 2 * 3; // 3 seconds of mono 16-bit audio
+  if (totalMono < minBytes) {
+    Serial.printf("[Rec] discarded (too short): %lu bytes\n", (unsigned long)totalMono);
+    SD_MMC.remove(path);
+    return false;
+  }
+
+  lastRecNum = num;
+  Serial.printf("[Rec] done: %lu bytes\n", (unsigned long)totalMono);
+  return true;
+}
+
+bool recordToggle() {
+  while (digitalRead(BTN_REC) == LOW) delay(5);
+
+  int num = nextNoteNumber();
+  char path[64]; snprintf(path, sizeof(path), "%s/note_%03d.wav", NOTES_DIR, num);
+  Serial.printf("[Rec] %s (toggle mode)\n", path);
+
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) return false;
+
+  uint8_t header[44]={}; f.write(header, 44);
+
+  int16_t* sbuf = (int16_t*)heap_caps_malloc(REC_BUF,   MALLOC_CAP_8BIT);
+  int16_t* mbuf = (int16_t*)heap_caps_malloc(REC_BUF/2, MALLOC_CAP_8BIT);
+  if (!sbuf||!mbuf) {
+    if(sbuf)heap_caps_free(sbuf); if(mbuf)heap_caps_free(mbuf);
+    f.close(); return false;
+  }
+
+  uint32_t totalMono=0, t0=millis();
+  uint32_t lastRingUpdate = millis();
+  showRecordingLive(readBatteryPercent(), 100 - max(sdUsedPercent(), 0));
+
+  for (;;) {
+    audio_playback_read((void*)sbuf, REC_BUF);
+    int mono = REC_BUF/4;
+    for (int i=0;i<mono;i++) mbuf[i] = sbuf[i*2];
+    size_t written = f.write((uint8_t*)mbuf, mono*2);
+    if (written == 0) break;
+    totalMono += written;
+
+    if (millis() - lastRingUpdate > REC_RING_UPDATE_MS) {
+      lastRingUpdate = millis();
+      int sdUsed = sdUsedPercent();
+      showRecordingLive(readBatteryPercent(), sdUsed < 0 ? -1 : 100 - sdUsed);
+    }
+
+    if (millis() - t0 >= 500 && digitalRead(BTN_REC) == LOW) {
+      delay(20);
+      if (digitalRead(BTN_REC) == LOW) {
+        while (digitalRead(BTN_REC) == LOW) delay(5);
+        break;
+      }
+    }
   }
 
   heap_caps_free(sbuf); heap_caps_free(mbuf);

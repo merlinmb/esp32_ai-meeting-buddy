@@ -68,6 +68,7 @@
 #define DOUBLE_MS           200
 #define ULTRA_SLEEP_MS      120000UL
 #define TICKER_INTERVAL_MS  950
+#define REC_RING_UPDATE_MS  20000UL
 
 /* Battery warning */
 #define BAT_CHECK_INTERVAL_MS  30000

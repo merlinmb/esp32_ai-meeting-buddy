@@ -5,6 +5,7 @@
 #include "buttons.h"
 
 extern void startRecordFlow();
+extern void startToggleRecordFlow();
 extern void resetActivity();
 
 bool isDown(int pin) { return digitalRead(pin) == LOW; }
@@ -75,5 +76,7 @@ bool handleIdleRec() {
     startRecordFlow();
     return true;
   }
+
+  startToggleRecordFlow();
   return true;
 }
