@@ -483,6 +483,24 @@
     margin-top: 2px;
   }
 
+  /* ---------- To-do list modal ---------- */
+  .todo-modal { max-width: 560px; max-height: 80vh; display: flex; flex-direction: column; }
+  .todo-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .todo-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    background: var(--panel-2, rgba(255,255,255,0.02));
+  }
+  .todo-item input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; width: 16px; height: 16px; }
+  .todo-item .todo-text { flex: 1; font-size: 0.88rem; line-height: 1.4; }
+  .todo-item.done .todo-text { text-decoration: line-through; color: var(--text-faint); }
+  .todo-item .todo-meta { font-size: 0.72rem; color: var(--text-faint); margin-top: 2px; }
+  .todo-empty { color: var(--text-faint); font-size: 0.85rem; padding: 20px 4px; text-align: center; }
+
   /* ---------- Audio playback modal ---------- */
   .audio-modal-overlay {
     display: none;
@@ -755,7 +773,8 @@
         <div class="mark"><i class="fa-solid fa-microphone"></i></div>
         <div class="name">Meeting Buddy<small>Receiver console</small></div>
       </div>
-      <form method="post" action="/logout" style="margin-left:auto">
+      <button class="btn" id="todosBtn" title="To-do list" style="margin-left:auto"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
+      <form method="post" action="/logout">
         <button type="submit" class="btn" title="Sign out"><i class="fa-solid fa-right-from-bracket"></i></button>
       </form>
     </div>
@@ -790,6 +809,11 @@
         <div class="label"><span class="icon"><i class="fa-solid fa-box-archive"></i></span> Archived</div>
         <div class="value" id="statArchived">–</div>
         <div class="footnote">Removed from the active list</div>
+      </div>
+      <div class="hero-card todos" onclick="openTodosModal()">
+        <div class="label"><span class="icon"><i class="fa-solid fa-list-check"></i></span> To-dos</div>
+        <div class="value" id="statTodosOpen">–</div>
+        <div class="footnote" id="statTodosClosed">–</div>
       </div>
       <div class="hero-card queue">
         <div class="label"><span class="icon"><i class="fa-solid fa-list-ol"></i></span> Processing queue</div>
@@ -877,6 +901,16 @@
     <button class="tab-table" data-tab="table"><span class="tab-icon"><i class="fa-solid fa-list"></i></span>Recordings</button>
     <button class="tab-transcript" data-tab="transcript"><span class="tab-icon"><i class="fa-solid fa-file-lines"></i></span>Transcript</button>
   </nav>
+</div>
+
+<div class="audio-modal-overlay" id="todosModalOverlay" onclick="if (event.target === this) closeTodosModal()">
+  <div class="audio-modal todo-modal">
+    <div class="audio-modal-header">
+      <div class="audio-modal-title">To-do list</div>
+      <button class="icon-btn" title="Close" onclick="closeTodosModal()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="todo-list" id="todoList"></div>
+  </div>
 </div>
 
 <div class="audio-modal-overlay" id="audioModalOverlay" onclick="if (event.target === this) closeAudioModal()">
@@ -1028,6 +1062,9 @@ function renderStats(stats) {
   document.getElementById("statFailed").textContent = stats.failed;
   document.getElementById("statBytes").textContent = fmtBytes(stats.total_bytes) + " received";
   document.getElementById("statArchived").textContent = stats.archived;
+  const todoCounts = stats.todo_counts || { open: 0, closed: 0 };
+  document.getElementById("statTodosOpen").textContent = todoCounts.open + " open";
+  document.getElementById("statTodosClosed").textContent = todoCounts.closed + " closed";
   document.getElementById("statQueue").textContent = stats.queue_length;
   document.getElementById("statQueueNote").textContent = stats.queue_length > 0
     ? "Whisper/LLM jobs run one at a time"
@@ -1429,7 +1466,62 @@ audioSeek.addEventListener("change", () => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && audioModalOverlay.classList.contains("open")) closeAudioModal();
+  if (e.key === "Escape" && todosModalOverlay.classList.contains("open")) closeTodosModal();
 });
+
+/* ---------- To-do list modal ---------- */
+const todosModalOverlay = document.getElementById("todosModalOverlay");
+const todoList = document.getElementById("todoList");
+
+async function loadTodos() {
+  todoList.innerHTML = '<div class="todo-empty">Loading...</div>';
+  try {
+    const res = await fetch("/api/todos");
+    const data = await res.json();
+    renderTodos(data.todos || []);
+  } catch (e) {
+    todoList.innerHTML = '<div class="todo-empty">Failed to load to-dos.</div>';
+  }
+}
+
+function renderTodos(todos) {
+  if (!todos.length) {
+    todoList.innerHTML = '<div class="todo-empty">No to-do items yet. Tag a recording as Note or Idea to have its tasks show up here.</div>';
+    return;
+  }
+  todoList.innerHTML = todos.map(t => `
+    <label class="todo-item ${t.done ? "done" : ""}">
+      <input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)">
+      <div>
+        <div class="todo-text">${escapeHtml(t.text)}</div>
+        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}</div>
+      </div>
+    </label>
+  `).join("");
+}
+
+async function toggleTodo(id, done) {
+  try {
+    await fetch(`/api/todos/${id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ done }),
+    });
+  } catch (e) {
+    // leave the checkbox as the user left it; next open reloads truth from the server
+  }
+}
+
+function openTodosModal() {
+  todosModalOverlay.classList.add("open");
+  loadTodos();
+}
+
+function closeTodosModal() {
+  todosModalOverlay.classList.remove("open");
+}
+
+document.getElementById("todosBtn").onclick = openTodosModal;
 
 /* ---------- Mobile tab bar ---------- */
 function showMobileTab(tab) {

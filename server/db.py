@@ -39,11 +39,24 @@ CREATE TABLE IF NOT EXISTS meetings (
 );
 """
 
+_TODOS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (meeting_id) REFERENCES meetings (id)
+);
+"""
+
 
 def init_db(db_path: Path):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute(_SCHEMA)
+    conn.execute(_TODOS_SCHEMA)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
     if "archived" not in columns:
         conn.execute("ALTER TABLE meetings ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
@@ -229,3 +242,71 @@ class MeetingStore:
                 "tag_counts": tag_counts,
                 "last_received": last_received[0] if last_received else None,
             }
+
+
+class TodoStore:
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        init_db(db_path)
+
+    @contextmanager
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def replace_for_meeting(self, meeting_id: int, texts):
+        """Swaps out every to-do for this meeting for a fresh set extracted
+        from its latest cleanup, so retagging or resubmitting a recording
+        doesn't leave stale or duplicate items behind."""
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM todos WHERE meeting_id = ?", (meeting_id,))
+            conn.executemany(
+                "INSERT INTO todos (meeting_id, text, done, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?)",
+                [(meeting_id, text, now, now) for text in texts],
+            )
+
+    def list_all(self, done: bool = None):
+        sql = (
+            "SELECT todos.*, meetings.meeting_name, meetings.tag, meetings.archived "
+            "FROM todos JOIN meetings ON meetings.id = todos.meeting_id "
+            "WHERE meetings.archived = 0"
+        )
+        params = []
+        if done is not None:
+            sql += " AND todos.done = ?"
+            params.append(1 if done else 0)
+        sql += " ORDER BY todos.id DESC"
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def get(self, todo_id: int):
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+            return dict(row) if row else None
+
+    def set_done(self, todo_id: int, done: bool):
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE todos SET done = ?, updated_at = ? WHERE id = ?",
+                (1 if done else 0, now, todo_id),
+            )
+
+    def counts(self):
+        with self._connect() as conn:
+            open_count = conn.execute(
+                "SELECT COUNT(*) FROM todos JOIN meetings ON meetings.id = todos.meeting_id "
+                "WHERE meetings.archived = 0 AND todos.done = 0"
+            ).fetchone()[0]
+            closed_count = conn.execute(
+                "SELECT COUNT(*) FROM todos JOIN meetings ON meetings.id = todos.meeting_id "
+                "WHERE meetings.archived = 0 AND todos.done = 1"
+            ).fetchone()[0]
+            return {"open": open_count, "closed": closed_count}

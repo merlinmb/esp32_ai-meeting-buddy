@@ -44,7 +44,7 @@ from flask import Flask, request, jsonify, render_template, send_file, abort, se
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from db import (MeetingStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
+from db import (MeetingStore, TodoStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
                 STATUS_COMPLETED, DEFAULT_TAG)
 
 load_dotenv(override=True)  # .env should win over any stray OS-level env vars of the same name
@@ -63,6 +63,12 @@ BEHIND_HTTPS_PROXY = os.environ.get("BEHIND_HTTPS_PROXY", "false").lower() == "t
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", "")
+# Separate, weaker credential for pulling the to-do list into an external
+# report: read-only (GET /api/todos only) and safe to hand to a script that
+# shouldn't also be able to upload recordings or mark todos done. Optional -
+# if unset, that endpoint just isn't reachable by token (session login still
+# works).
+TODOS_READ_TOKEN = os.environ.get("TODOS_READ_TOKEN", "")
 FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "")
 
 if not ADMIN_USERNAME or not ADMIN_PASSWORD:
@@ -142,6 +148,7 @@ def api_json_error(e):
 
 
 store = MeetingStore(OUTPUT_DIR / "meetings.db")
+todo_store = TodoStore(OUTPUT_DIR / "meetings.db")
 
 _whisper_model = None  # lazy-loaded so the server starts fast
 
@@ -201,6 +208,24 @@ def upload_token_required(view):
         if not supplied or not hmac.compare_digest(supplied, UPLOAD_TOKEN):
             abort(401)
         return view(*args, **kwargs)
+    return wrapped
+
+
+def todos_read_token_required(view):
+    """Read-only gate for GET /api/todos: accepts the full UPLOAD_TOKEN (so
+    existing integrations keep working), the narrower TODOS_READ_TOKEN, or a
+    browser session - but grants no access to anything else, so a report
+    script holding only TODOS_READ_TOKEN can't upload or mark todos done."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if session.get("logged_in"):
+            return view(*args, **kwargs)
+        supplied = request.headers.get("X-Upload-Token", "")
+        if supplied and hmac.compare_digest(supplied, UPLOAD_TOKEN):
+            return view(*args, **kwargs)
+        if supplied and TODOS_READ_TOKEN and hmac.compare_digest(supplied, TODOS_READ_TOKEN):
+            return view(*args, **kwargs)
+        abort(401)
     return wrapped
 
 
@@ -356,6 +381,11 @@ Produce a markdown document with these sections, in this order:
 
 TAG_NAMES = list(TAG_INSTRUCTIONS)
 
+# Tags whose recordings feed the to-do list. Meetings and everything else are
+# deliberately excluded for now - action items there stay inside the
+# transcript rather than becoming standalone tracked tasks.
+TODO_TAGS = {"Note", "Idea", "Buy"}
+
 # The device and the dashboard may send a tag in any casing; map it back to
 # the canonical spelling so "meeting" and "Meeting" aren't two separate tags.
 _TAG_BY_LOWER = {name.lower(): name for name in TAG_NAMES}
@@ -422,6 +452,37 @@ def clean_up_transcript(raw_transcript: str, meeting_name: str, tag: str = DEFAU
     result = clean_up_with_ollama(prompt) if LLM_PROVIDER == "ollama" else clean_up_with_claude(prompt)
     print(f"Cleanup for '{meeting_name}' finished in {time.monotonic() - start:.1f}s")
     return result
+
+
+def build_todo_extraction_prompt(cleaned_markdown: str) -> str:
+    return f"""Below is a cleaned-up spoken note or idea. Extract any concrete
+to-do items, tasks, or reminders it contains - things the speaker said they
+need to do, should do, or want to follow up on.
+
+Reply with one item per line, each starting with "- ". Keep each item short
+and actionable. If there are no clear to-do items, reply with exactly: NONE
+
+Note:
+---
+{cleaned_markdown}
+---
+"""
+
+
+def extract_todo_items(cleaned_markdown: str) -> list[str]:
+    """Pulls a flat list of to-do strings out of a Note/Idea's cleaned
+    markdown via a second, small LLM call. Kept separate from the cleanup
+    call so the cleanup prompt (and its output format) doesn't have to change
+    just to also serve structured extraction."""
+    prompt = build_todo_extraction_prompt(cleaned_markdown)
+    reply = clean_up_with_ollama(prompt) if LLM_PROVIDER == "ollama" else clean_up_with_claude(prompt)
+    items = []
+    for line in reply.splitlines():
+        line = line.strip().lstrip("-*").strip()
+        if not line or line.upper() == "NONE":
+            continue
+        items.append(line)
+    return items
 
 
 def send_email(subject: str, body_markdown: str):
@@ -571,6 +632,12 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
     if tag in IMMEDIATE_EMAIL_TAGS:
         send_email(f"Meeting transcript: {meeting_name}", cleaned_markdown)
         store.mark_emailed([meeting_id])
+
+    # Regenerated from scratch every time this runs (initial upload, retry,
+    # or a retag that lands back on a to-do tag) so a resubmission can't
+    # leave duplicate or stale items behind.
+    todo_items = extract_todo_items(cleaned_markdown) if tag in TODO_TAGS else []
+    todo_store.replace_for_meeting(meeting_id, todo_items)
 
     store.save_result(meeting_id, str(out_path))
 
@@ -904,6 +971,7 @@ def stats():
     result = store.stats()
     result["queue_length"] = queue_length()
     result["partial_uploads"] = list_partial_uploads()
+    result["todo_counts"] = todo_store.counts()
     return jsonify(result)
 
 
@@ -934,6 +1002,15 @@ def set_meeting_tag(meeting_id):
 
     store.set_tag(meeting_id, tag)
     print(f"Tagged meeting {meeting_id} as '{tag}'")
+
+    # Recordings still in the pipeline pick up the new tag naturally when
+    # run_summarize_and_save runs; an already-completed one needs its to-dos
+    # regenerated (or cleared) here since that step has already happened.
+    if meeting["status"] == STATUS_COMPLETED:
+        note = note_text(meeting)
+        todo_items = extract_todo_items(note) if (tag in TODO_TAGS and note) else []
+        todo_store.replace_for_meeting(meeting_id, todo_items)
+
     return jsonify({"status": "ok", "tag": tag}), 200
 
 
@@ -1212,6 +1289,46 @@ def select_notes():
         meetings = [m for m in meetings if meeting_matches_query(m, query)]
 
     return meetings
+
+
+def todo_summary(todo: dict) -> dict:
+    return {
+        "id": todo["id"],
+        "text": todo["text"],
+        "done": bool(todo["done"]),
+        "meeting_id": todo["meeting_id"],
+        "meeting_name": todo["meeting_name"],
+        "tag": todo["tag"],
+        "created_at": todo["created_at"],
+        "updated_at": todo["updated_at"],
+    }
+
+
+@app.route("/api/todos", methods=["GET"])
+@todos_read_token_required
+def list_todos():
+    """To-do items extracted from Note/Idea recordings, newest first. Pass
+    done=1 or done=0 to filter by completion state; otherwise both are
+    returned. Meant to be pulled externally (e.g. into a daily report) as
+    well as rendered on the dashboard."""
+    raw_done = request.args.get("done", "").strip()
+    done = {"1": True, "0": False}.get(raw_done)
+    todos = todo_store.list_all(done=done)
+    return jsonify({"count": len(todos), "todos": [todo_summary(t) for t in todos]})
+
+
+@app.route("/api/todos/<int:todo_id>", methods=["POST"])
+@upload_token_required
+def update_todo(todo_id):
+    """Marks a to-do done or not done. Body: {"done": true|false}."""
+    todo = todo_store.get(todo_id)
+    if not todo:
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    raw_done = data.get("done", request.form.get("done", request.args.get("done", "1")))
+    done = str(raw_done).strip().lower() in ("1", "true", "yes")
+    todo_store.set_done(todo_id, done)
+    return jsonify({"status": "ok", "id": todo_id, "done": done}), 200
 
 
 @app.route("/api/notes", methods=["GET"])
