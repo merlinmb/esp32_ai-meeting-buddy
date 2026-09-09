@@ -25,6 +25,7 @@ Run:
 import functools
 import hmac
 import io
+import logging
 import os
 import queue
 import secrets
@@ -46,6 +47,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 from db import (MeetingStore, TodoStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
                 STATUS_COMPLETED, DEFAULT_TAG)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+)
 
 load_dotenv(override=True)  # .env should win over any stray OS-level env vars of the same name
 
@@ -235,7 +243,7 @@ def login():
     if request.method == "POST":
         ip = _client_ip()
         if _login_rate_limited(ip):
-            print(f"Login rate-limited for {ip}")
+            logging.info(f"Login rate-limited for {ip}")
             error = "Too many failed attempts - try again in a few minutes."
         else:
             username = request.form.get("username", "")
@@ -244,7 +252,7 @@ def login():
                 ADMIN_PASSWORD_HASH, password
             )
             if valid:
-                print(f"Login succeeded for {ip}")
+                logging.info(f"Login succeeded for {ip}")
                 _record_login_success(ip)
                 session.clear()
                 session["logged_in"] = True
@@ -253,7 +261,7 @@ def login():
                 if not next_path.startswith("/"):
                     next_path = url_for("dashboard")
                 return redirect(next_path)
-            print(f"Login failed for {ip} (username={username!r})")
+            logging.info(f"Login failed for {ip} (username={username!r})")
             _record_login_failure(ip)
             error = "Invalid username or password."
     return render_template("login.html", error=error)
@@ -269,7 +277,7 @@ def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
         from faster_whisper import WhisperModel
-        print(f"Loading faster-whisper model '{WHISPER_MODEL}' on {WHISPER_DEVICE} "
+        logging.info(f"Loading faster-whisper model '{WHISPER_MODEL}' on {WHISPER_DEVICE} "
               f"({WHISPER_COMPUTE_TYPE}) (first run downloads it)...")
         _whisper_model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
     return _whisper_model
@@ -284,7 +292,7 @@ def transcribe_audio(wav_path: Path) -> str:
     segments, info = model.transcribe(str(wav_path), beam_size=5)
     text = " ".join(seg.text.strip() for seg in segments)
     elapsed = time.monotonic() - start
-    print(f"Transcribed {wav_path.name}: {info.duration:.1f}s audio -> "
+    logging.info(f"Transcribed {wav_path.name}: {info.duration:.1f}s audio -> "
           f"{len(text)} chars in {elapsed:.1f}s ({info.duration / elapsed:.1f}x realtime)")
     return text
 
@@ -424,7 +432,7 @@ def clean_up_with_claude(prompt: str) -> str:
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
-    print(f"Claude cleanup: {response.usage.input_tokens} in / {response.usage.output_tokens} out tokens")
+    logging.info(f"Claude cleanup: {response.usage.input_tokens} in / {response.usage.output_tokens} out tokens")
     return next(block.text for block in response.content if block.type == "text")
 
 
@@ -437,7 +445,7 @@ def clean_up_with_ollama(prompt: str) -> str:
     )
     response.raise_for_status()
     body = response.json()
-    print(f"Ollama cleanup ({OLLAMA_MODEL}): {body.get('eval_count', '?')} tokens "
+    logging.info(f"Ollama cleanup ({OLLAMA_MODEL}): {body.get('eval_count', '?')} tokens "
           f"in {body.get('eval_duration', 0) / 1e9:.1f}s")
     return body["response"]
 
@@ -446,11 +454,11 @@ def clean_up_transcript(raw_transcript: str, meeting_name: str, tag: str = DEFAU
     """Turns the rough ASR transcript into a cleaned-up markdown summary,
     via either Claude or a local Ollama model depending on LLM_PROVIDER.
     The tag selects which set of instructions the model is given."""
-    print(f"Cleaning up '{meeting_name}' [{tag}] with {LLM_PROVIDER} ({len(raw_transcript)} chars of raw transcript)...")
+    logging.info(f"Cleaning up '{meeting_name}' [{tag}] with {LLM_PROVIDER} ({len(raw_transcript)} chars of raw transcript)...")
     prompt = build_cleanup_prompt(raw_transcript, meeting_name, tag)
     start = time.monotonic()
     result = clean_up_with_ollama(prompt) if LLM_PROVIDER == "ollama" else clean_up_with_claude(prompt)
-    print(f"Cleanup for '{meeting_name}' finished in {time.monotonic() - start:.1f}s")
+    logging.info(f"Cleanup for '{meeting_name}' finished in {time.monotonic() - start:.1f}s")
     return result
 
 
@@ -475,7 +483,9 @@ def extract_todo_items(cleaned_markdown: str) -> list[str]:
     call so the cleanup prompt (and its output format) doesn't have to change
     just to also serve structured extraction."""
     prompt = build_todo_extraction_prompt(cleaned_markdown)
+    start = time.monotonic()
     reply = clean_up_with_ollama(prompt) if LLM_PROVIDER == "ollama" else clean_up_with_claude(prompt)
+    logging.info(f"Todo extraction finished in {time.monotonic() - start:.1f}s")
     items = []
     for line in reply.splitlines():
         line = line.strip().lstrip("-*").strip()
@@ -489,7 +499,7 @@ def send_email(subject: str, body_markdown: str):
     if not EMAIL_ENABLED:
         return
     if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD and EMAIL_FROM and EMAIL_TO):
-        print("EMAIL_ENABLED is true but SMTP settings are incomplete - skipping email.")
+        logging.info("EMAIL_ENABLED is true but SMTP settings are incomplete - skipping email.")
         return
     send_email_to(EMAIL_TO, subject, body_markdown)
 
@@ -580,7 +590,7 @@ def run_digest() -> dict:
     repeatedly: with nothing pending it sends nothing and reports so."""
     pending = store.list_pending_digest(exclude_tags=IMMEDIATE_EMAIL_TAGS)
     if not pending:
-        print("Digest: nothing new to send.")
+        logging.info("Digest: nothing new to send.")
         return {"status": "ok", "sent": 0, "meeting_ids": []}
 
     body = build_digest_body(pending)
@@ -589,14 +599,14 @@ def run_digest() -> dict:
     if not EMAIL_ENABLED:
         # Without this the notes would be silently marked as emailed and
         # never appear in any future digest.
-        print(f"Digest: EMAIL_ENABLED is false - leaving {len(pending)} note(s) pending.")
+        logging.info(f"Digest: EMAIL_ENABLED is false - leaving {len(pending)} note(s) pending.")
         return {"status": "skipped", "reason": "email disabled", "sent": 0,
                 "meeting_ids": [m["id"] for m in pending]}
 
     if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD and EMAIL_FROM and EMAIL_TO):
         # send_email() would return quietly here; marking the notes emailed
         # after that would lose them for good.
-        print(f"Digest: SMTP settings incomplete - leaving {len(pending)} note(s) pending.")
+        logging.info(f"Digest: SMTP settings incomplete - leaving {len(pending)} note(s) pending.")
         return {"status": "skipped", "reason": "smtp incomplete", "sent": 0,
                 "meeting_ids": [m["id"] for m in pending]}
 
@@ -605,7 +615,7 @@ def run_digest() -> dict:
     send_email_to(EMAIL_TO, subject, body)
     ids = [m["id"] for m in pending]
     store.mark_emailed(ids)
-    print(f"Digest: emailed {len(ids)} note(s) - ids {ids}")
+    logging.info(f"Digest: emailed {len(ids)} note(s) - ids {ids}")
     return {"status": "ok", "sent": len(ids), "meeting_ids": ids}
 
 
@@ -623,7 +633,7 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
 
     out_path = OUTPUT_DIR / f"{meeting_name}_{meeting_id}.md"
     out_path.write_text(f"# {meeting_name}\n\n{cleaned_markdown}\n", encoding="utf-8")
-    print(f"Wrote transcript: {out_path}")
+    logging.info(f"Wrote transcript: {out_path}")
 
     # Tags in IMMEDIATE_EMAIL_TAGS go out on their own the moment they are
     # ready; everything else is held back for the periodic digest, so a
@@ -679,7 +689,7 @@ def _do_summarize_only(meeting_id: int, raw_transcript: str, meeting_name: str):
 
 def _enqueue(job_kind: str, args: tuple):
     _job_queue.put((job_kind, args))
-    print(f"Queued '{job_kind}' job for meeting {args[0]} "
+    logging.info(f"Queued '{job_kind}' job for meeting {args[0]} "
           f"({_job_queue.qsize()} waiting behind{' + 1 running' if _job_in_progress else ''})")
 
 
@@ -689,16 +699,16 @@ def _job_worker():
         job_kind, args = _job_queue.get()
         meeting_id = args[0]
         _job_in_progress = True
-        print(f"Starting '{job_kind}' job for meeting {meeting_id}")
+        logging.info(f"Starting '{job_kind}' job for meeting {meeting_id}")
         start = time.monotonic()
         try:
             if job_kind == "transcribe":
                 _do_transcribe_and_summarize(*args)
             elif job_kind == "summarize":
                 _do_summarize_only(*args)
-            print(f"Finished '{job_kind}' job for meeting {meeting_id} in {time.monotonic() - start:.1f}s")
+            logging.info(f"Finished '{job_kind}' job for meeting {meeting_id} in {time.monotonic() - start:.1f}s")
         except Exception as e:
-            print(f"'{job_kind}' job for meeting {meeting_id} failed after {time.monotonic() - start:.1f}s: {e}")
+            logging.error(f"'{job_kind}' job for meeting {meeting_id} failed after {time.monotonic() - start:.1f}s: {e}")
             traceback.print_exc()
             store.update_status(meeting_id, STATUS_FAILED, error=str(e))
         finally:
@@ -748,7 +758,7 @@ def upload():
     wav_path = RAW_AUDIO_DIR / f"{meeting_name}_{upload_tag}.wav"
     audio_file.save(wav_path)
     wav_bytes = wav_path.stat().st_size
-    print(f"Received {wav_path} ({wav_bytes} bytes)")
+    logging.info(f"Received {wav_path} ({wav_bytes} bytes)")
 
     meeting_id = store.create(meeting_name, str(wav_path), wav_bytes)
     # A tag sent with the upload is applied straight away; uploaders that
@@ -887,7 +897,7 @@ def upload_chunk():
     part_path.rename(final_path)
     meeting_id = store.create(meeting_name, str(final_path), new_size)
     _enqueue("transcribe", (meeting_id, final_path, meeting_name))
-    print(f"Chunked upload complete: {final_path} ({new_size} bytes)")
+    logging.info(f"Chunked upload complete: {final_path} ({new_size} bytes)")
     # The trailing id lets the device follow up with POST /api/meetings/<id>/tag.
     # It comes after "COMPLETE" so an older device that only looks for the
     # leading integer and the marker keeps working unchanged.
@@ -1001,7 +1011,7 @@ def set_meeting_tag(meeting_id):
         }), 400
 
     store.set_tag(meeting_id, tag)
-    print(f"Tagged meeting {meeting_id} as '{tag}'")
+    logging.info(f"Tagged meeting {meeting_id} as '{tag}'")
 
     # Recordings still in the pipeline pick up the new tag naturally when
     # run_summarize_and_save runs; an already-completed one needs its to-dos
@@ -1449,9 +1459,9 @@ if __name__ == "__main__":
         result = run_digest()
         sys.exit(0 if result["status"] in ("ok", "skipped") else 1)
 
-    print(f"AI Meeting Buddy receiver listening on port {UPLOAD_PORT}")
-    print(f"Transcripts will be saved to: {OUTPUT_DIR.resolve()}")
-    print(f"Dashboard: http://localhost:{UPLOAD_PORT}/")
+    logging.info(f"AI Meeting Buddy receiver listening on port {UPLOAD_PORT}")
+    logging.info(f"Transcripts will be saved to: {OUTPUT_DIR.resolve()}")
+    logging.info(f"Dashboard: http://localhost:{UPLOAD_PORT}/")
     if BEHIND_HTTPS_PROXY:
         # Flask's built-in dev server isn't meant for production traffic;
         # waitress is a production-ready pure-Python WSGI server with no
