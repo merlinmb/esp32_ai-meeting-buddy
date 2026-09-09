@@ -441,7 +441,7 @@ def clean_up_with_ollama(prompt: str) -> str:
     response = requests.post(
         f"{OLLAMA_URL}/api/generate",
         json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-        timeout=300,
+        timeout=600,
     )
     response.raise_for_status()
     body = response.json()
