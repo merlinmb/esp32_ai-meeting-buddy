@@ -43,7 +43,7 @@
   /* ---------- App shell: 3 columns ---------- */
   .app-shell {
     display: grid;
-    grid-template-columns: 15% 40% 1fr;
+    grid-template-columns: 220px 60% 1fr;
     height: 100vh;
   }
 
@@ -496,7 +496,9 @@
     background: var(--panel-2, rgba(255,255,255,0.02));
   }
   .todo-item input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; width: 16px; height: 16px; }
-  .todo-item .todo-text { flex: 1; font-size: 0.88rem; line-height: 1.4; }
+  .todo-item .todo-text { flex: 1; font-size: 0.88rem; line-height: 1.4; cursor: text; border-radius: 4px; padding: 1px 3px; margin: -1px -3px; }
+  .todo-item .todo-text:hover { background: var(--panel-2, rgba(255,255,255,0.04)); }
+  .todo-item .todo-text:focus { outline: 1px solid var(--border-soft); background: var(--panel-2, rgba(255,255,255,0.04)); }
   .todo-item.done .todo-text { text-decoration: line-through; color: var(--text-faint); }
   .todo-item .todo-meta { font-size: 0.72rem; color: var(--text-faint); margin-top: 2px; }
   .todo-empty { color: var(--text-faint); font-size: 0.85rem; padding: 20px 4px; text-align: center; }
@@ -882,6 +884,7 @@
       <div class="email-bar" id="detailEmailBar" style="display:none">
         <button class="icon-btn" id="copyBtn" title="Copy transcript"><i class="fa-regular fa-copy"></i></button>
         <button class="icon-btn" id="downloadRawBtn" title="Download this transcript"><i class="fa-solid fa-download"></i></button>
+        <button class="icon-btn" id="downloadDocxBtn" title="Download as Word document"><i class="fa-solid fa-file-word"></i></button>
         <div class="email-icon"><i class="fa-solid fa-envelope"></i></div>
         <input type="email" id="emailTo" placeholder="Send transcript to email address...">
         <button class="btn primary" id="emailBtn">Send</button>
@@ -1298,6 +1301,9 @@ function parseMarkdownSections(markdown) {
 
 // Minimal inline markdown -> HTML for card bodies: bullet lists and plain
 // paragraphs only, matching the small set of constructs the LLM prompts ask for.
+function renderInlineMarkdown(text) {
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
 function renderSectionBody(sectionLines) {
   const text = sectionLines.join("\n").trim();
   if (!text) return "";
@@ -1305,9 +1311,9 @@ function renderSectionBody(sectionLines) {
   return blocks.map(block => {
     const items = block.split("\n").filter(l => l.trim());
     if (items.every(l => /^[-*]\s+/.test(l.trim()))) {
-      return `<ul>${items.map(l => `<li>${escapeHtml(l.trim().replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
+      return `<ul>${items.map(l => `<li>${renderInlineMarkdown(l.trim().replace(/^[-*]\s+/, ""))}</li>`).join("")}</ul>`;
     }
-    return `<p>${escapeHtml(block.trim()).replace(/\n/g, "<br>")}</p>`;
+    return `<p>${renderInlineMarkdown(block.trim()).replace(/\n/g, "<br>")}</p>`;
   }).join("");
 }
 
@@ -1490,13 +1496,13 @@ function renderTodos(todos) {
     return;
   }
   todoList.innerHTML = todos.map(t => `
-    <label class="todo-item ${t.done ? "done" : ""}">
+    <div class="todo-item ${t.done ? "done" : ""}">
       <input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)">
       <div>
-        <div class="todo-text">${escapeHtml(t.text)}</div>
+        <div class="todo-text" contenteditable="true" spellcheck="false" data-id="${t.id}" data-original="${escapeHtml(t.text)}" onblur="saveTodoText(this)" onkeydown="handleTodoTextKeydown(event, this)">${escapeHtml(t.text)}</div>
         <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}</div>
       </div>
-    </label>
+    </div>
   `).join("");
 }
 
@@ -1509,6 +1515,37 @@ async function toggleTodo(id, done) {
     });
   } catch (e) {
     // leave the checkbox as the user left it; next open reloads truth from the server
+  }
+}
+
+function handleTodoTextKeydown(event, el) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    el.blur();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    el.textContent = el.dataset.original;
+    el.blur();
+  }
+}
+
+async function saveTodoText(el) {
+  const id = el.dataset.id;
+  const text = el.textContent.trim();
+  if (!text) {
+    el.textContent = el.dataset.original;
+    return;
+  }
+  if (text === el.dataset.original) return;
+  try {
+    await fetch(`/api/todos/${id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    el.dataset.original = text;
+  } catch (e) {
+    el.textContent = el.dataset.original;
   }
 }
 
@@ -1593,6 +1630,11 @@ document.getElementById("downloadRawBtn").onclick = () => {
   // and lets the browser honour the Content-Disposition filename.
   const endpoint = viewingRaw ? "raw_transcript/download" : "transcript/download";
   window.location.href = `/api/meetings/${currentMeetingId}/${endpoint}`;
+};
+
+document.getElementById("downloadDocxBtn").onclick = () => {
+  if (currentMeetingId === null) return;
+  window.location.href = `/api/meetings/${currentMeetingId}/transcript/download_docx`;
 };
 
 document.getElementById("emailBtn").onclick = async () => {

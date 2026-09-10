@@ -21,3 +21,13 @@ services:
               count: all
               capabilities: [gpu]
 
+  meeting-buddy-mcp:
+    build: ../mcp-server
+    image: ai-meeting-buddy-mcp:local
+    container_name: ai-meeting-buddy-mcp
+    restart: unless-stopped
+    ports:
+      - "8788:8788"
+    env_file:
+      - ../mcp-server/.env
+

@@ -28,6 +28,7 @@ import io
 import logging
 import os
 import queue
+import re
 import secrets
 import smtplib
 import sys
@@ -41,6 +42,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 from dotenv import load_dotenv
+from docx import Document
+from docx.shared import Pt
 from flask import Flask, request, jsonify, render_template, send_file, abort, session, redirect, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -220,10 +223,11 @@ def upload_token_required(view):
 
 
 def todos_read_token_required(view):
-    """Read-only gate for GET /api/todos: accepts the full UPLOAD_TOKEN (so
-    existing integrations keep working), the narrower TODOS_READ_TOKEN, or a
-    browser session - but grants no access to anything else, so a report
-    script holding only TODOS_READ_TOKEN can't upload or mark todos done."""
+    """Read-only gate for GET /api/todos and GET /api/stats: accepts the full
+    UPLOAD_TOKEN (so existing integrations keep working), the narrower
+    TODOS_READ_TOKEN, or a browser session - but grants no access to
+    anything else, so a report script holding only TODOS_READ_TOKEN can't
+    upload, mark todos done, or reach any other endpoint."""
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
         if session.get("logged_in"):
@@ -976,7 +980,7 @@ def list_meetings():
 
 
 @app.route("/api/stats", methods=["GET"])
-@login_required
+@todos_read_token_required
 def stats():
     result = store.stats()
     result["queue_length"] = queue_length()
@@ -1117,6 +1121,63 @@ def download_transcript(meeting_id):
         abort(404)
     return send_file(path, mimetype="text/markdown", as_attachment=True,
                       download_name=f"{meeting['meeting_name']}.md")
+
+
+def _add_bold_runs(paragraph, text):
+    # Splits on **bold** markers and adds each segment as its own run.
+    parts = re.split(r"\*\*(.+?)\*\*", text)
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        run = paragraph.add_run(part)
+        run.bold = bool(i % 2)
+
+
+def markdown_to_docx(markdown, title):
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Calibri"
+    style.font.size = Pt(11)
+
+    doc.add_heading(title, level=0)
+
+    for line in markdown.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = re.match(r"^(#{1,3})\s+(.*)", stripped)
+        bullet = re.match(r"^[-*]\s+(.*)", stripped)
+        if heading:
+            level = min(len(heading.group(1)), 3)
+            _add_bold_runs(doc.add_heading("", level=level), heading.group(2).strip())
+        elif bullet:
+            _add_bold_runs(doc.add_paragraph(style="List Bullet"), bullet.group(1).strip())
+        else:
+            _add_bold_runs(doc.add_paragraph(), stripped)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/api/meetings/<int:meeting_id>/transcript/download_docx", methods=["GET"])
+@login_required
+def download_transcript_docx(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting or not meeting["transcript_path"]:
+        abort(404)
+    path = Path(meeting["transcript_path"])
+    if not path.exists():
+        abort(404)
+    markdown = path.read_text(encoding="utf-8")
+    buf = markdown_to_docx(markdown, meeting["meeting_name"])
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=f"{meeting['meeting_name']}.docx",
+    )
 
 
 @app.route("/api/meetings/<int:meeting_id>/raw_transcript", methods=["GET"])
@@ -1330,15 +1391,26 @@ def list_todos():
 @app.route("/api/todos/<int:todo_id>", methods=["POST"])
 @upload_token_required
 def update_todo(todo_id):
-    """Marks a to-do done or not done. Body: {"done": true|false}."""
+    """Marks a to-do done/not done and/or edits its text.
+    Body: {"done": true|false} and/or {"text": "..."}."""
     todo = todo_store.get(todo_id)
     if not todo:
         abort(404)
     data = request.get_json(silent=True) or {}
-    raw_done = data.get("done", request.form.get("done", request.args.get("done", "1")))
-    done = str(raw_done).strip().lower() in ("1", "true", "yes")
-    todo_store.set_done(todo_id, done)
-    return jsonify({"status": "ok", "id": todo_id, "done": done}), 200
+
+    if "text" in data or "text" in request.form:
+        text = str(data.get("text", request.form.get("text", ""))).strip()
+        if not text:
+            abort(400)
+        todo_store.set_text(todo_id, text)
+
+    if "done" in data or "done" in request.form or "done" in request.args:
+        raw_done = data.get("done", request.form.get("done", request.args.get("done", "1")))
+        done = str(raw_done).strip().lower() in ("1", "true", "yes")
+        todo_store.set_done(todo_id, done)
+
+    updated = todo_store.get(todo_id)
+    return jsonify({"status": "ok", "id": todo_id, "done": bool(updated["done"]), "text": updated["text"]}), 200
 
 
 @app.route("/api/notes", methods=["GET"])

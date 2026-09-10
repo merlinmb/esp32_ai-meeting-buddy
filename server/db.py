@@ -299,6 +299,14 @@ class TodoStore:
                 (1 if done else 0, now, todo_id),
             )
 
+    def set_text(self, todo_id: int, text: str):
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE todos SET text = ?, updated_at = ? WHERE id = ?",
+                (text, now, todo_id),
+            )
+
     def counts(self):
         with self._connect() as conn:
             open_count = conn.execute(
