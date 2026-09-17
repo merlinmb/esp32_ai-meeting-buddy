@@ -9,6 +9,7 @@
 #include "../../sounds.h"
 #include "battery.h"
 #include "ui.h"
+#include "sleep.h"
 
 extern "C" {
 #include "../../src/audio/audio_bsp.h"
@@ -89,6 +90,7 @@ bool recordToggle() {
 
   uint32_t totalMono=0, t0=millis();
   uint32_t lastRingUpdate = millis();
+  resetActivity();
   showRecordingLive(readBatteryPercent(), 100 - max(sdUsedPercent(), 0));
 
   for (;;) {
@@ -101,6 +103,7 @@ bool recordToggle() {
 
     if (millis() - lastRingUpdate > REC_RING_UPDATE_MS) {
       lastRingUpdate = millis();
+      resetActivity();
       int sdUsed = sdUsedPercent();
       showRecordingLive(readBatteryPercent(), sdUsed < 0 ? -1 : 100 - sdUsed);
     }
@@ -109,6 +112,7 @@ bool recordToggle() {
       delay(20);
       if (digitalRead(BTN_REC) == LOW) {
         while (digitalRead(BTN_REC) == LOW) delay(5);
+        resetActivity();
         break;
       }
     }

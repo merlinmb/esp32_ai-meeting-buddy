@@ -7,6 +7,7 @@
 #include "network.h"
 #include "../../sounds.h"
 #include "WiFi.h"
+#include "SD_MMC.h"
 #include "driver/gpio.h"
 
 extern "C" {
@@ -28,6 +29,16 @@ void enterUltraSleep() {
 
   audio_playback_set_vol(0);
   palaSoundSetEnabled(false);
+
+  board.POWEER_EPD_OFF();
+  board.POWEER_Audio_OFF();
+
+  // All note/index/tag writes go through File::close(), which flushes and
+  // updates the FAT entry synchronously before returning - so by the time
+  // we get here any write that led to this sleep has already landed on
+  // disk. Unmounting is still needed so the card itself is left in a
+  // clean state (not mid-transaction) rather than power-cut while mounted.
+  SD_MMC.end();
 
   board.VBAT_POWER_ON();
 
