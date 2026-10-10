@@ -276,6 +276,9 @@ void syncWebServerWithWifi() {
   }
 }
 
+static uint32_t moments[MAX_MOMENTS];
+static int momentCount = 0;
+
 void startRecording() {
   // SD init at boot can fail if the card wasn't seated yet; retry here so
   // inserting a card and pressing record recovers without a reboot.
@@ -304,6 +307,7 @@ void startRecording() {
   }
   visualizer.reset();
   recordingStartMs = millis();
+  momentCount = 0;
   state = State::RECORDING;
   firstRecordingDraw = true;
   Sounds::recordStart();
@@ -316,7 +320,17 @@ void stopRecording() {
     recorder.discardLast();  // too short to be a real recording - drop it
   } else {
     lastRecordingSeconds = elapsed;
+    if (momentCount > 0) {
+      String mp = recorder.lastPath();
+      mp = mp.substring(0, mp.length() - 4) + ".mom";
+      File mf = SD.open(mp, FILE_WRITE);
+      if (mf) {
+        for (int i = 0; i < momentCount; i++) mf.println((unsigned long)moments[i]);
+        mf.close();
+      }
+    }
   }
+  momentCount = 0;
   M5.Mic.end();  // release I2S/codec between recordings to save power
   // Mic and Speaker share one ES8311 codec chip; M5.Mic.end() powers the
   // whole codec down via its own enable callback, but M5Unified's
@@ -928,6 +942,15 @@ void loop() {
 
     case State::RECORDING: {
       pumpAudioToSd();
+#if MOMENT_ON_NAV
+      if (nav && !select) {
+        uint32_t t = millis() - recordingStartMs;
+        if (momentCount < MAX_MOMENTS && (momentCount == 0 || t - moments[momentCount - 1] >= 1000)) {
+          moments[momentCount++] = t;
+        }
+        nav = false;
+      }
+#endif
       if (select || nav || (millis() - recordingStartMs) >= MAX_RECORDING_MINUTES * 60UL * 1000UL) {
         stopRecording();
         break;

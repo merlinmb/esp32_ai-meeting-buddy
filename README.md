@@ -16,6 +16,9 @@ The AI Meeting Buddy combines embedded recording hardware with a companion trans
 - **Battery-optimized:** WiFi radio only active during uploads, not during recording
 - **Timestamped recordings:** RTC keeps accurate time across power cycles
 - **Upload queue:** multiple meetings batch-uploaded in a single WiFi session
+- **Second brain (server):** every note gets a structured memory (title, summary, people, decisions), dated tasks/appointments resolved to your timezone, plus *Ask your notes*, daily/weekly briefings and recaps via the dashboard, API and MCP
+- **Moments:** mark key points while recording (PalaNote: short-press PWR; StickS3: G12/encoder rotation); they're uploaded with the note
+- **Long recording preserved:** up to `MAX_RECORDING_MINUTES` (121) on both devices
 
 ## What's Inside
 
@@ -201,6 +204,19 @@ See [`server/README.md`](server/README.md) for detailed setup.
 3. **Claude:** Feed the transcript text to Claude for summarization and action items
 
 The delivered `server/receive_and_transcribe.py` defaults to local `faster-whisper`. Swapping to a hosted ASR API is a one-line change—see the server README.
+
+## Second-brain features & considerations
+
+Details and the endpoint table are in [server/README.md](server/README.md). Key points:
+
+- **Set `LOCAL_TIMEZONE`** (e.g. `Europe/London`) in `server/.env`. Dates such as "tomorrow at 3pm" are resolved in code against it. PalaNote uploads UTC-stamped names (`note_N_YYYYMMDDHHMMSS`); StickS3 uploads local-time names (`MEETING_YYYYMMDD_HHMMSS`); the server handles both.
+- **Task extraction is tag-based:** tasks/events are created for Note/Idea/Buy notes. StickS3 uploads are tagged `Meeting` (`UPLOAD_TAG`), which still get a memory/summary but no tasks unless `TASKS_FROM_ALL_TAGS=true`.
+- **Existing recordings:** run `POST /api/brain/backfill` once to build memories for older notes.
+- **Fallback:** `MEMORY_ENABLED=false` restores the original behaviour; if memory extraction fails the note still completes.
+- **Optional semantic search:** set `EMBEDDING_MODEL` (e.g. `nomic-embed-text`) and pull it in Ollama; otherwise Ask uses keyword search.
+- **Rebuild the Docker image** after updating (`brain.py` is new). The SQLite schema migrates automatically and additively.
+- **Power:** no sleep/wake/battery logic was changed on either device. Moment tracking adds no radio use while recording.
+- **Not included:** on-device Ask/briefing screens and TTS; use the dashboard, MCP or API.
 
 ## Power & Battery Life
 

@@ -81,7 +81,11 @@ class WavRecorder {
   // Deletes the last file written by close() - used to discard recordings
   // too short to be useful.
   void discardLast() {
-    if (_path.length()) SD.remove(_path);
+    if (_path.length()) {
+      SD.remove(_path);
+      String mp = _path.substring(0, _path.length() - 4) + ".mom";
+      if (SD.exists(mp)) SD.remove(mp);
+    }
   }
 
   // Lists .wav files in the root directory - files already uploaded live
@@ -115,6 +119,8 @@ class WavRecorder {
       if (!isDir && name.endsWith(".wav")) {
         String path = name.startsWith("/") ? name : "/" + name;
         SD.remove(path);
+        String mp = path.substring(0, path.length() - 4) + ".mom";
+        if (SD.exists(mp)) SD.remove(mp);
         count++;
       }
       f = root.openNextFile();

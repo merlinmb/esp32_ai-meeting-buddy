@@ -10,6 +10,10 @@ since Claude connectors need MCP, not a plain REST API.
 - `mark_todo_done(todo_id: int, done: bool = True)` - check an item off (or
   back on). Requires `MEETING_BUDDY_WRITE_TOKEN`.
 - `get_stats()` - recording counts, to-do open/closed counts, queue length.
+- `ask_notes(question)` - answer a question from your notes, with sources.
+- `get_agenda(period="daily")` - briefing of appointments/due/overdue (`daily` or `weekly`).
+- `get_calendar(days=14)` - dated open tasks and events.
+- `get_recap(period="week")` - recap of `day`/`week`/`month`.
 
 ## Setup
 

@@ -186,6 +186,12 @@ class WifiUploader {
         Serial.println("uploadFile: tagging meeting " + String(meetingId) + " as '" + String(UPLOAD_TAG) +
                        "' failed - server keeps its default tag");
       }
+      sendMoments(session, host, port, useTls, meetingId, path);
+    }
+    if (ok) {
+      // Sidecar is best-effort: drop it once the recording is safely uploaded.
+      String mp = momentsPath(path);
+      if (SD.exists(mp)) SD.remove(mp);
     }
     session.close();
     return ok;
@@ -427,6 +433,48 @@ class WifiUploader {
     if (!ok || statusCode != 200) return false;
     Serial.println("tagMeeting: meeting " + String(meetingId) + " tagged '" + tag + "'");
     return true;
+  }
+
+  static String momentsPath(const String &wavPath) {
+    return wavPath.substring(0, wavPath.length() - 4) + ".mom";
+  }
+
+  // Best-effort upload of the <name>.mom sidecar (one ms offset per line);
+  // never affects whether the recording counts as uploaded.
+  bool sendMoments(Session &session, const String &host, int port, bool useTls, long meetingId,
+                   const String &wavPath) {
+    String mp = momentsPath(wavPath);
+    if (!SD.exists(mp)) return true;
+    File mf = SD.open(mp, FILE_READ);
+    if (!mf) return false;
+    String payload = "{\"offsets_ms\":[";
+    bool first = true;
+    while (mf.available()) {
+      String ln = mf.readStringUntil('\n');
+      ln.trim();
+      if (!ln.length()) continue;
+      if (!first) payload += ",";
+      payload += String(ln.toInt());
+      first = false;
+    }
+    mf.close();
+    if (first) return true;
+    payload += "]}";
+    if (!session.ensureOpen(host, port, useTls)) return false;
+    WiFiClient &client = *session.client;
+    String req = "POST " + uploadPathPrefix() + "/api/meetings/" + String(meetingId) + "/moments HTTP/1.1\r\n" +
+                 "Host: " + host + "\r\n" +
+                 "Content-Type: application/json\r\n" +
+                 "Content-Length: " + String(payload.length()) + "\r\n" +
+                 "X-Upload-Token: " + UPLOAD_TOKEN + "\r\n" +
+                 "Connection: keep-alive\r\n\r\n" + payload;
+    client.write((const uint8_t *)req.c_str(), req.length());
+    int statusCode = 0;
+    String body;
+    bool keepAlive = false;
+    bool ok = readHttpResponse(client, millis() + UPLOAD_SOCKET_TIMEOUT_MS, statusCode, body, keepAlive);
+    if (!keepAlive) session.close();
+    return ok && statusCode == 200;
   }
 
   // UPLOAD_SERVER_URL's path with a trailing "/upload" removed, i.e. the
