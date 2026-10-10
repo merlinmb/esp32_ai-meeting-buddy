@@ -12,6 +12,13 @@
 void loadIndex() {
   noteIndex.clear();
   File f = SD_MMC.open(INDEX_FILE);
+  // saveIndex() removes the old index before renaming the new one into
+  // place; if power was lost in between, the complete new copy is index.tmp.
+  bool fromTmp = false;
+  if (!f && SD_MMC.exists("/notes/index.tmp")) {
+    f = SD_MMC.open("/notes/index.tmp");
+    fromTmp = (bool)f;
+  }
   if (!f) return;
   while (f.available()) {
     String ln = f.readStringUntil('\n'); ln.trim();
@@ -26,6 +33,7 @@ void loadIndex() {
     noteIndex.push_back(e);
   }
   f.close();
+  if (fromTmp) saveIndex();
 }
 
 void saveIndex() {
@@ -70,7 +78,7 @@ void markNoteUploaded(int num) {
 }
 
 void deleteNote(int num) {
-  const char* exts[] = {"wav", "txt", "meta", nullptr};
+  const char* exts[] = {"wav", "txt", "meta", "mom", nullptr};
   char path[64];
   for (int e = 0; exts[e]; e++) {
     snprintf(path, sizeof(path), "%s/note_%03d.%s", NOTES_DIR, num, exts[e]);

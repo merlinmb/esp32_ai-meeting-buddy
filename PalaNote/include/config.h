@@ -56,6 +56,9 @@
 #define SAMPLE_RATE  16000
 #define REC_BUF      (8 * 1024)
 
+/* Maximum length of a single recording; recording stops automatically when hit */
+#define MAX_RECORDING_MINUTES  121
+
 /* Storage paths */
 #define NOTES_DIR  "/notes"
 #define INDEX_FILE "/notes/index.csv"

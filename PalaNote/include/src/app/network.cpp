@@ -326,6 +326,45 @@ static void sendTag(long meetingId, const char* deviceTag) {
   if (code != 200) Serial.printf("[Upload] tag %s failed (code %d)\n", tag.c_str(), code);
 }
 
+// Sends the moments marked during recording (note_NNN.mom, one millisecond
+// offset per line). Best-effort and idempotent: the server replaces the set.
+static void sendMoments(long meetingId, int noteNum) {
+  if (meetingId <= 0) return;
+  char path[64]; snprintf(path, sizeof(path), "%s/note_%03d.mom", NOTES_DIR, noteNum);
+  if (!SD_MMC.exists(path)) return;
+  File mf = SD_MMC.open(path);
+  if (!mf) return;
+  String payload = "{\"offsets_ms\":[";
+  bool first = true;
+  while (mf.available()) {
+    String ln = mf.readStringUntil('\n'); ln.trim();
+    if (!ln.length()) continue;
+    if (!first) payload += ",";
+    payload += String(ln.toInt());
+    first = false;
+  }
+  mf.close();
+  if (first) return;
+  payload += "]}";
+
+  const ServerUrl& u = serverUrl();
+  WiFiClient* client = openServerConn();
+  if (!client) return;
+  client->printf("POST %s/api/meetings/%ld/moments HTTP/1.1\r\n"
+                 "Host: %s\r\n"
+                 "X-Upload-Token: %s\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: %u\r\n"
+                 "Connection: close\r\n\r\n%s",
+                 u.base.c_str(), meetingId, u.host.c_str(), UPLOAD_TOKEN,
+                 (unsigned)payload.length(), payload.c_str());
+  int code; String body;
+  readPlainResponse(*client, code, body);
+  client->stop();
+  delete client;
+  if (code != 200) Serial.printf("[Upload] moments failed (code %d)\n", code);
+}
+
 // Finds the server's id for an already-uploaded recording by the name it was
 // stored under. Used when the upload completed but the server didn't hand
 // back an id, which happens whenever this attempt resumed onto a file an
@@ -388,7 +427,7 @@ static bool uploadToServer(const String& wavPath, int noteNum, const char* devic
     f.close();
     if (noteMeetingId(noteNum) <= 0) {
       long id = lookupMeetingId(fileName);
-      if (id > 0) { setNoteMeetingId(noteNum, id); sendTag(id, deviceTag); }
+      if (id > 0) { setNoteMeetingId(noteNum, id); sendTag(id, deviceTag); sendMoments(id, noteNum); }
     }
     return true;
   }
@@ -440,6 +479,7 @@ static bool uploadToServer(const String& wavPath, int noteNum, const char* devic
     return true;   // audio is safely there; text just can't be fetched back
   }
   sendTag(meetingId, deviceTag);
+  sendMoments(meetingId, noteNum);
   // Remember which recording this became server-side, so a later sync can
   // fetch its processed markdown once Whisper and the AI are done with it.
   setNoteMeetingId(noteNum, meetingId);

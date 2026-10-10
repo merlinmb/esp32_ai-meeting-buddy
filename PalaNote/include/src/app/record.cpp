@@ -6,6 +6,7 @@
 #include "SD_MMC.h"
 #include "esp_heap_caps.h"
 #include "notes.h"
+#include "settings.h"
 #include "../../sounds.h"
 #include "battery.h"
 #include "ui.h"
@@ -41,6 +42,7 @@ bool record() {
     size_t written = f.write((uint8_t*)mbuf, mono*2);
     if (written == 0) break;
     totalMono += written;
+    if (millis() - t0 >= MAX_RECORDING_MINUTES * 60UL * 1000UL) break;
   }
 
   heap_caps_free(sbuf); heap_caps_free(mbuf);
@@ -90,6 +92,12 @@ bool recordToggle() {
 
   uint32_t totalMono=0, t0=millis();
   uint32_t lastRingUpdate = millis();
+  // Moments: a short press of the power button marks the current point in the
+  // recording. Armed only once the button has been seen released, so a press
+  // that was already held when recording started is never counted.
+  const int MAX_MOMENTS = 100;
+  uint32_t moments[MAX_MOMENTS]; int momentCount = 0;
+  bool momentArmed = false; uint32_t lastMomentMs = 0;
   resetActivity();
   showRecordingLive(readBatteryPercent(), 100 - max(sdUsedPercent(), 0));
 
@@ -100,6 +108,21 @@ bool recordToggle() {
     size_t written = f.write((uint8_t*)mbuf, mono*2);
     if (written == 0) break;
     totalMono += written;
+
+    bool pwrDown = digitalRead(BTN_PWR) == LOW;
+    if (!pwrDown) momentArmed = true;
+    else if (momentArmed && momentCount < MAX_MOMENTS && millis() - t0 >= 500 &&
+             millis() - lastMomentMs >= 1000) {
+      moments[momentCount++] = millis() - t0;
+      lastMomentMs = millis();
+      momentArmed = false;
+      Serial.printf("[Rec] moment %d at %lu ms\n", momentCount, (unsigned long)(millis() - t0));
+    }
+
+    if (millis() - t0 >= MAX_RECORDING_MINUTES * 60UL * 1000UL) {
+      Serial.println("[Rec] max recording length reached");
+      break;
+    }
 
     if (millis() - lastRingUpdate > REC_RING_UPDATE_MS) {
       lastRingUpdate = millis();
@@ -139,6 +162,15 @@ bool recordToggle() {
     return false;
   }
 
+  if (momentCount > 0) {
+    char mpath[64]; snprintf(mpath, sizeof(mpath), "%s/note_%03d.mom", NOTES_DIR, num);
+    File mf = SD_MMC.open(mpath, FILE_WRITE);
+    if (mf) {
+      for (int i = 0; i < momentCount; i++) mf.printf("%lu\n", (unsigned long)moments[i]);
+      mf.close();
+    }
+  }
+
   lastRecNum = num;
   Serial.printf("[Rec] done: %lu bytes\n", (unsigned long)totalMono);
   return true;
@@ -166,7 +198,7 @@ bool playWavFile(const char* path) {
   stopPlayback  = false;
 
   palaSoundSetEnabled(false);
-  audio_playback_set_vol(85);
+  audio_playback_set_vol(settingsVolume());
 
   while (f.available() && !stopPlayback) {
     int readBytes = f.read(monoBuf, monoBytes);

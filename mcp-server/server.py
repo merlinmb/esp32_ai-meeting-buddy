@@ -100,6 +100,32 @@ def mark_todo_done(todo_id: int, done: bool = True) -> dict:
 
 
 @mcp.tool()
+def ask_notes(question: str) -> dict:
+    """Ask a question answered from the user's own voice notes (structured
+    memory + retrieval). Returns the answer and the source notes used."""
+    return _post("/api/ask", WRITE_TOKEN, {"question": question})
+
+
+@mcp.tool()
+def get_agenda(period: str = "daily") -> dict:
+    """Spoken-style briefing of appointments, due tasks and overdue items.
+    period is "daily" or "weekly"."""
+    return _get(f"/api/briefing/{period}", READ_TOKEN)
+
+
+@mcp.tool()
+def get_calendar(days: int = 14) -> dict:
+    """Open dated tasks/events (with resolved dates) for the next N days."""
+    return _get("/api/calendar", READ_TOKEN, {"days": days})
+
+
+@mcp.tool()
+def get_recap(period: str = "week") -> dict:
+    """LLM recap of recent notes. period is "day", "week" or "month"."""
+    return _get("/api/recap", WRITE_TOKEN, {"period": period})
+
+
+@mcp.tool()
 def get_stats() -> dict:
     """Overall AI Meeting Buddy stats: recording counts by status, to-do
     open/closed counts, and processing queue length. Useful for a daily

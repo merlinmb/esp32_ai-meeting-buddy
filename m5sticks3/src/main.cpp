@@ -928,7 +928,7 @@ void loop() {
 
     case State::RECORDING: {
       pumpAudioToSd();
-      if (select || nav) {
+      if (select || nav || (millis() - recordingStartMs) >= MAX_RECORDING_MINUTES * 60UL * 1000UL) {
         stopRecording();
         break;
       }

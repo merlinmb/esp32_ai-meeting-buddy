@@ -71,8 +71,57 @@ def init_db(db_path: Path):
         # go, which is exactly the repeated-notes problem the digest exists to
         # avoid.
         conn.execute("UPDATE meetings SET emailed_at = ?", (_now_iso(),))
+    for name, ddl in _MEETING_MEMORY_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE meetings ADD COLUMN {name} {ddl}")
+    todo_columns = {row[1] for row in conn.execute("PRAGMA table_info(todos)")}
+    for name, ddl in _TODO_COLUMNS:
+        if name not in todo_columns:
+            conn.execute(f"ALTER TABLE todos ADD COLUMN {name} {ddl}")
+    conn.execute(_MOMENTS_SCHEMA)
+    conn.execute(_EMBEDDINGS_SCHEMA)
     conn.commit()
     conn.close()
+
+
+# Structured "memory" extracted from each note (see brain.py). All nullable /
+# defaulted so existing rows and the existing pipeline keep working untouched.
+_MEETING_MEMORY_COLUMNS = [
+    ("title", "TEXT"),
+    ("summary", "TEXT"),
+    ("importance", "INTEGER NOT NULL DEFAULT 1"),
+    ("language", "TEXT"),
+    ("memory_json", "TEXT"),
+    ("memory_updated_at", "TEXT"),
+]
+
+_TODO_COLUMNS = [
+    ("due_utc", "TEXT"),
+    ("type", "TEXT NOT NULL DEFAULT 'todo'"),
+    ("date_precision", "TEXT NOT NULL DEFAULT 'none'"),
+    ("confidence", "INTEGER"),
+    ("original_time_text", "TEXT"),
+]
+
+_MOMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS moments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL,
+    offset_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (meeting_id) REFERENCES meetings (id)
+);
+"""
+
+_EMBEDDINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS embeddings (
+    meeting_id INTEGER PRIMARY KEY,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (meeting_id) REFERENCES meetings (id)
+);
+"""
 
 
 class MeetingStore:
@@ -264,13 +313,41 @@ class TodoStore:
         from its latest cleanup, so retagging or resubmitting a recording
         doesn't leave stale or duplicate items behind."""
         now = _now_iso()
+        rows = []
+        for item in texts:
+            # Plain strings (legacy extraction) or dicts (structured tasks).
+            if isinstance(item, str):
+                item = {"text": item}
+            rows.append((
+                meeting_id, item["text"], now, now,
+                item.get("due_utc") or None,
+                item.get("type") or "todo",
+                item.get("date_precision") or "none",
+                item.get("confidence"),
+                item.get("original_time_text") or None,
+            ))
         with self._connect() as conn:
+            # Keep completion state across a regeneration: otherwise
+            # retagging or retrying a note would silently reopen tasks the
+            # user already ticked off.
+            done_texts = {
+                r["text"].strip().lower()
+                for r in conn.execute(
+                    "SELECT text FROM todos WHERE meeting_id = ? AND done = 1", (meeting_id,))
+            }
             conn.execute("DELETE FROM todos WHERE meeting_id = ?", (meeting_id,))
             conn.executemany(
-                "INSERT INTO todos (meeting_id, text, done, created_at, updated_at) "
-                "VALUES (?, ?, 0, ?, ?)",
-                [(meeting_id, text, now, now) for text in texts],
+                "INSERT INTO todos (meeting_id, text, done, created_at, updated_at, "
+                "due_utc, type, date_precision, confidence, original_time_text) "
+                "VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
             )
+            if done_texts:
+                conn.execute(
+                    "UPDATE todos SET done = 1 WHERE meeting_id = ? AND lower(trim(text)) IN (%s)"
+                    % ",".join("?" * len(done_texts)),
+                    [meeting_id, *done_texts],
+                )
 
     def list_all(self, done: bool = None):
         sql = (

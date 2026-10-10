@@ -43,6 +43,7 @@ extern "C" {
 #include "src/app/network.h"
 #include "src/app/sleep.h"
 #include "src/app/record.h"
+#include "src/app/settings.h"
 
 // All pin, timing, path and threshold constants live in config.h.
 
@@ -158,7 +159,7 @@ void startSyncFlow() {
   const int MAX_TRIES = 20;
   showWifiConnecting(0, MAX_TRIES);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  settingsWifiBegin();
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < MAX_TRIES) {
     delay(500); tries++;
@@ -192,7 +193,7 @@ void startTransferMode() {
   showTransferConnecting();
 
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  settingsWifiBegin();
 
   const int MAX_TRIES = 24;
   int tries = 0;
@@ -317,6 +318,7 @@ void loop() {
   }
 
   if (transferServerActive) transferServer.handleClient();
+  settingsPollSerial();
 
   // Battery warning: dismiss after 2.5 s without blocking
   if (batWarnActive && millis() >= batWarnShowUntilMs) {

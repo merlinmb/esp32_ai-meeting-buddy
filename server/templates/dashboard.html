@@ -775,7 +775,8 @@
         <div class="mark"><i class="fa-solid fa-microphone"></i></div>
         <div class="name">Meeting Buddy<small>Receiver console</small></div>
       </div>
-      <button class="btn" id="todosBtn" title="To-do list" style="margin-left:auto"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
+      <button class="btn" id="askBtn" title="Ask your notes" style="margin-left:auto"><i class="fa-solid fa-comments"></i> Ask</button>
+      <button class="btn" id="todosBtn" title="To-do list"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
       <form method="post" action="/logout">
         <button type="submit" class="btn" title="Sign out"><i class="fa-solid fa-right-from-bracket"></i></button>
       </form>
@@ -913,6 +914,25 @@
       <button class="icon-btn" title="Close" onclick="closeTodosModal()"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="todo-list" id="todoList"></div>
+  </div>
+</div>
+
+<div class="audio-modal-overlay" id="askModalOverlay" onclick="if (event.target === this) closeAskModal()">
+  <div class="audio-modal todo-modal">
+    <div class="audio-modal-header">
+      <div class="audio-modal-title">Ask your notes</div>
+      <button class="icon-btn" title="Close" onclick="closeAskModal()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px">
+      <button class="btn" onclick="loadBrief('daily')">Today</button>
+      <button class="btn" onclick="loadBrief('weekly')">This week</button>
+      <button class="btn" onclick="loadRecap('week')">Recap</button>
+    </div>
+    <form onsubmit="event.preventDefault(); askNotes();" style="display:flex; gap:6px">
+      <input id="askInput" type="text" placeholder="Ask about your notes..." style="flex:1; padding:6px 8px">
+      <button class="btn" type="submit">Ask</button>
+    </form>
+    <div class="todo-list" id="askResult" style="white-space:pre-wrap; font-size:0.9rem"></div>
   </div>
 </div>
 
@@ -1490,6 +1510,16 @@ async function loadTodos() {
   }
 }
 
+function todoDueLabel(t) {
+  if (!t.due_utc) return "";
+  const d = new Date(t.due_utc);
+  if (isNaN(d)) return "";
+  const when = t.date_precision === "time" ? d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
+                                           : d.toLocaleDateString([], { dateStyle: "medium" });
+  const kind = t.type && t.type !== "todo" ? t.type + " " : "";
+  return ` &middot; <i class="fa-regular fa-calendar"></i> ${escapeHtml(kind + when)}`;
+}
+
 function renderTodos(todos) {
   if (!todos.length) {
     todoList.innerHTML = '<div class="todo-empty">No to-do items yet. Tag a recording as Note or Idea to have its tasks show up here.</div>';
@@ -1500,7 +1530,7 @@ function renderTodos(todos) {
       <input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)">
       <div>
         <div class="todo-text" contenteditable="true" spellcheck="false" data-id="${t.id}" data-original="${escapeHtml(t.text)}" onblur="saveTodoText(this)" onkeydown="handleTodoTextKeydown(event, this)">${escapeHtml(t.text)}</div>
-        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}</div>
+        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}${todoDueLabel(t)}</div>
       </div>
     </div>
   `).join("");
@@ -1559,6 +1589,43 @@ function closeTodosModal() {
 }
 
 document.getElementById("todosBtn").onclick = openTodosModal;
+
+const askOverlay = document.getElementById("askModalOverlay");
+const askResult = document.getElementById("askResult");
+function closeAskModal() { askOverlay.classList.remove("open"); }
+document.getElementById("askBtn").onclick = () => {
+  askOverlay.classList.add("open");
+  document.getElementById("askInput").focus();
+};
+async function askFetch(url, opts) {
+  askResult.textContent = "Working...";
+  try {
+    const res = await fetch(url, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    return data;
+  } catch (e) {
+    askResult.textContent = "Failed: " + e.message;
+    return null;
+  }
+}
+async function askNotes() {
+  const q = document.getElementById("askInput").value.trim();
+  if (!q) return;
+  const d = await askFetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ question: q }) });
+  if (!d) return;
+  const src = (d.sources || []).map(s => `#${s.id} ${s.title || ""}`).join("\n");
+  askResult.textContent = d.answer + (src ? "\n\nSources:\n" + src : "");
+}
+async function loadBrief(period) {
+  const d = await askFetch("/api/briefing/" + period);
+  if (d) askResult.textContent = d.text;
+}
+async function loadRecap(period) {
+  const d = await askFetch("/api/recap?period=" + period);
+  if (d) askResult.textContent = d.recap;
+}
 
 /* ---------- Mobile tab bar ---------- */
 function showMobileTab(tab) {

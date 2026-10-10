@@ -48,6 +48,7 @@ from flask import Flask, request, jsonify, render_template, send_file, abort, se
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import brain
 from db import (MeetingStore, TodoStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
                 STATUS_COMPLETED, DEFAULT_TAG)
 
@@ -160,6 +161,14 @@ def api_json_error(e):
 
 store = MeetingStore(OUTPUT_DIR / "meetings.db")
 todo_store = TodoStore(OUTPUT_DIR / "meetings.db")
+brain_store = brain.BrainStore(OUTPUT_DIR / "meetings.db")
+
+# Second-brain features. MEMORY_ENABLED=false restores the original
+# behaviour exactly (plain to-do extraction, no structured memory).
+MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"
+MEMORY_LANGUAGE = os.environ.get("MEMORY_LANGUAGE", "").strip()
+TASKS_FROM_ALL_TAGS = os.environ.get("TASKS_FROM_ALL_TAGS", "false").lower() == "true"
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "").strip()
 
 _whisper_model = None  # lazy-loaded so the server starts fast
 
@@ -440,13 +449,12 @@ def clean_up_with_claude(prompt: str) -> str:
     return next(block.text for block in response.content if block.type == "text")
 
 
-def clean_up_with_ollama(prompt: str) -> str:
+def clean_up_with_ollama(prompt: str, json_mode: bool = False) -> str:
     import requests
-    response = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-        timeout=600,
-    )
+    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+    if json_mode:
+        payload["format"] = "json"
+    response = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=600)
     response.raise_for_status()
     body = response.json()
     logging.info(f"Ollama cleanup ({OLLAMA_MODEL}): {body.get('eval_count', '?')} tokens "
@@ -464,6 +472,30 @@ def clean_up_transcript(raw_transcript: str, meeting_name: str, tag: str = DEFAU
     result = clean_up_with_ollama(prompt) if LLM_PROVIDER == "ollama" else clean_up_with_claude(prompt)
     logging.info(f"Cleanup for '{meeting_name}' finished in {time.monotonic() - start:.1f}s")
     return result
+
+
+def llm_call(prompt: str, json_mode: bool = False) -> str:
+    """Provider-neutral LLM call used by the second-brain features."""
+    if LLM_PROVIDER == "ollama":
+        return clean_up_with_ollama(prompt, json_mode=json_mode)
+    return clean_up_with_claude(prompt)
+
+
+def embed_text(text: str):
+    """Embedding vector from Ollama, or None when EMBEDDING_MODEL is unset or
+    the call fails (search then falls back to keywords)."""
+    if not EMBEDDING_MODEL:
+        return None
+    try:
+        import requests
+        r = requests.post(f"{OLLAMA_URL}/api/embed",
+                          json={"model": EMBEDDING_MODEL, "input": text[:8000]}, timeout=120)
+        r.raise_for_status()
+        vectors = r.json().get("embeddings") or []
+        return vectors[0] if vectors else None
+    except Exception as e:
+        logging.warning(f"Embedding failed: {e}")
+        return None
 
 
 def build_todo_extraction_prompt(cleaned_markdown: str) -> str:
@@ -650,10 +682,36 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
     # Regenerated from scratch every time this runs (initial upload, retry,
     # or a retag that lands back on a to-do tag) so a resubmission can't
     # leave duplicate or stale items behind.
-    todo_items = extract_todo_items(cleaned_markdown) if tag in TODO_TAGS else []
-    todo_store.replace_for_meeting(meeting_id, todo_items)
+    build_memory_and_tasks(meeting_id, cleaned_markdown, tag)
 
     store.save_result(meeting_id, str(out_path))
+
+
+def build_memory_and_tasks(meeting_id: int, cleaned_markdown: str, tag: str):
+    """Structured memory + dated tasks for one note. Never raises: if the
+    structured path fails, the note still completes and tasks fall back to
+    the original plain extraction."""
+    meeting = store.get(meeting_id) or {}
+    wants_tasks = tag in TODO_TAGS or TASKS_FROM_ALL_TAGS
+    memory = None
+    if MEMORY_ENABLED:
+        try:
+            memory = brain.extract_memory(llm_call, cleaned_markdown, meeting, MEMORY_LANGUAGE)
+        except Exception as e:
+            logging.warning(f"Memory extraction failed for meeting {meeting_id}: {e}")
+    if memory:
+        brain_store.save_memory(meeting_id, memory, MEMORY_LANGUAGE)
+        todo_store.replace_for_meeting(meeting_id, memory["tasks"] if wants_tasks else [])
+        vec = embed_text(f"{memory['title']}\n{memory['summary']}\n" + "\n".join(memory["facts"]))
+        if vec:
+            brain_store.save_embedding(meeting_id, EMBEDDING_MODEL, vec)
+        return
+    try:
+        items = extract_todo_items(cleaned_markdown) if tag in TODO_TAGS else []
+    except Exception as e:
+        logging.warning(f"Todo extraction failed for meeting {meeting_id}: {e}")
+        return
+    todo_store.replace_for_meeting(meeting_id, items)
 
 
 _SAFE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
@@ -691,6 +749,13 @@ def _do_summarize_only(meeting_id: int, raw_transcript: str, meeting_name: str):
     run_summarize_and_save(meeting_id, raw_transcript, meeting_name)
 
 
+def _do_memory_only(meeting_id: int):
+    meeting = store.get(meeting_id)
+    note = note_text(meeting) if meeting else None
+    if note:
+        build_memory_and_tasks(meeting_id, note, meeting.get("tag") or DEFAULT_TAG)
+
+
 def _enqueue(job_kind: str, args: tuple):
     _job_queue.put((job_kind, args))
     logging.info(f"Queued '{job_kind}' job for meeting {args[0]} "
@@ -710,6 +775,8 @@ def _job_worker():
                 _do_transcribe_and_summarize(*args)
             elif job_kind == "summarize":
                 _do_summarize_only(*args)
+            elif job_kind == "memory":
+                _do_memory_only(*args)
             logging.info(f"Finished '{job_kind}' job for meeting {meeting_id} in {time.monotonic() - start:.1f}s")
         except Exception as e:
             logging.error(f"'{job_kind}' job for meeting {meeting_id} failed after {time.monotonic() - start:.1f}s: {e}")
@@ -1022,8 +1089,10 @@ def set_meeting_tag(meeting_id):
     # regenerated (or cleared) here since that step has already happened.
     if meeting["status"] == STATUS_COMPLETED:
         note = note_text(meeting)
-        todo_items = extract_todo_items(note) if (tag in TODO_TAGS and note) else []
-        todo_store.replace_for_meeting(meeting_id, todo_items)
+        if note:
+            build_memory_and_tasks(meeting_id, note, tag)
+        else:
+            todo_store.replace_for_meeting(meeting_id, [])
 
     return jsonify({"status": "ok", "tag": tag}), 200
 
@@ -1281,6 +1350,12 @@ def note_recorded_at(meeting: dict):
             return datetime.strptime(name[8:23], "%Y%m%d_%H%M%S")
         except ValueError:
             pass
+    m = re.search(r"note_\d+_(\d{14})", name)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        except ValueError:
+            pass
     try:
         return datetime.fromisoformat(meeting["received_at"]).replace(tzinfo=None)
     except (ValueError, TypeError):
@@ -1372,6 +1447,10 @@ def todo_summary(todo: dict) -> dict:
         "tag": todo["tag"],
         "created_at": todo["created_at"],
         "updated_at": todo["updated_at"],
+        "type": todo.get("type") or "todo",
+        "due_utc": todo.get("due_utc"),
+        "date_precision": todo.get("date_precision") or "none",
+        "original_time_text": todo.get("original_time_text"),
     }
 
 
@@ -1504,6 +1583,168 @@ def download_notes():
 @login_required
 def dashboard():
     return render_template("dashboard.html")
+
+
+# ---------------------------------------------------------------------------
+# Second brain: memory, agenda, briefings, ask, recap, moments, voice commands
+# ---------------------------------------------------------------------------
+
+def _local_today():
+    return datetime.now(brain.local_tz()).date()
+
+
+def _excerpt(meeting: dict, limit: int = 1200) -> str:
+    text = note_text(meeting) or ""
+    lines = text.split("\n")
+    if lines and lines[0].startswith("# "):
+        text = "\n".join(lines[1:])
+    return text.strip()[:limit]
+
+
+def _llm_failed(e: Exception):
+    logging.warning(f"LLM call failed: {e}")
+    return jsonify({"error": f"LLM unavailable: {e}"}), 502
+
+
+@app.route("/api/meetings/<int:meeting_id>/memory", methods=["GET"])
+@upload_token_required
+def get_memory(meeting_id):
+    meeting = store.get(meeting_id)
+    if not meeting:
+        abort(404)
+    return jsonify({"id": meeting_id, "memory": brain_store.get_memory(meeting_id)})
+
+
+@app.route("/api/meetings/<int:meeting_id>/moments", methods=["GET", "POST"])
+@upload_token_required
+def meeting_moments(meeting_id):
+    """Marked moments (button presses during a recording) as millisecond
+    offsets. POST replaces the set, so a device that retries is idempotent."""
+    if not store.get(meeting_id):
+        abort(404)
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        try:
+            offsets = [int(o) for o in (data.get("offsets_ms") or [])]
+        except (TypeError, ValueError):
+            return jsonify({"error": "offsets_ms must be a list of integers"}), 400
+        saved = brain_store.replace_moments(meeting_id, offsets)
+        return jsonify({"status": "ok", "count": len(saved)})
+    return jsonify({"offsets_ms": brain_store.get_moments(meeting_id)})
+
+
+@app.route("/api/calendar", methods=["GET"])
+@todos_read_token_required
+def api_calendar():
+    """Open dated tasks/events. ?from=YYYY-MM-DD (default today) &days=N (default 14)."""
+    try:
+        start = datetime.strptime(request.args.get("from", ""), "%Y-%m-%d").date() \
+            if request.args.get("from") else _local_today()
+        days = max(1, min(366, int(request.args.get("days", "14"))))
+    except ValueError:
+        return jsonify({"error": "invalid 'from' or 'days'"}), 400
+    return jsonify({"from": start.isoformat(), "days": days,
+                    "items": brain.agenda(brain_store, start, days)})
+
+
+@app.route("/api/agenda", methods=["GET"])
+@todos_read_token_required
+def api_agenda():
+    """Today's (or ?days=N) agenda as structured items plus speakable text."""
+    return jsonify(brain.build_briefing(brain_store, "daily"))
+
+
+@app.route("/api/briefing/<period>", methods=["GET"])
+@todos_read_token_required
+def api_briefing(period):
+    if period not in ("daily", "weekly"):
+        abort(404)
+    return jsonify(brain.build_briefing(brain_store, period))
+
+
+@app.route("/api/ask", methods=["POST"])
+@upload_token_required
+def api_ask():
+    """Answers a question from the user's own notes. Body: {"question": "..."}."""
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("question", "")).strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    memories = brain_store.list_memories()
+    qvec, vectors = None, None
+    if EMBEDDING_MODEL:
+        qvec = embed_text(question)
+        vectors = brain_store.all_embeddings(EMBEDDING_MODEL) if qvec else None
+    hits = brain.retrieve(question, memories, limit=5, query_vec=qvec, vectors=vectors)
+    contexts = []
+    for h in hits:
+        meeting = store.get(h["id"]) or {}
+        contexts.append(brain.memory_context(h, _excerpt(meeting) if meeting else ""))
+    if not hits:
+        return jsonify({"answer": "I couldn't find anything about that in your notes.",
+                        "sources": []})
+    try:
+        answer = llm_call(brain.build_ask_prompt(question, contexts,
+                                                 datetime.now(brain.local_tz()))).strip()
+    except Exception as e:
+        return _llm_failed(e)
+    return jsonify({"answer": answer,
+                    "sources": [{"id": h["id"], "title": h["memory"].get("title"),
+                                 "captured_utc": h["captured_utc"]} for h in hits]})
+
+
+@app.route("/api/recap", methods=["GET"])
+@upload_token_required
+def api_recap():
+    """Recap of the last day/week/month: ?period=day|week|month."""
+    period = request.args.get("period", "week")
+    if period not in ("day", "week", "month"):
+        return jsonify({"error": "period must be day, week or month"}), 400
+    since, until = brain.recap_window(period)
+    entries = brain_store.list_memories(since, until)
+    if not entries:
+        return jsonify({"period": period, "recap": f"No notes in the last {period}.", "count": 0})
+    try:
+        recap = llm_call(brain.build_recap_prompt(entries[:40], period)).strip()
+    except Exception as e:
+        return _llm_failed(e)
+    return jsonify({"period": period, "recap": recap, "count": len(entries)})
+
+
+@app.route("/api/todos/command", methods=["POST"])
+@upload_token_required
+def todo_command():
+    """Applies a spoken task command ("mark the dentist task done").
+    Body: {"text": "..."}. Only ever acts on an existing task."""
+    data = request.get_json(silent=True) or {}
+    speech = str(data.get("text", "")).strip()
+    if not speech:
+        return jsonify({"error": "text is required"}), 400
+    open_tasks = todo_store.list_all(done=False)
+    done_tasks = todo_store.list_all(done=True)
+    try:
+        action, task = brain.apply_task_command(llm_call, speech, open_tasks, done_tasks)
+    except Exception as e:
+        return _llm_failed(e)
+    if task is None:
+        return jsonify({"status": "no_match", "action": "none"})
+    todo_store.set_done(task["id"], action == "complete")
+    return jsonify({"status": "ok", "action": action, "id": task["id"], "text": task["text"]})
+
+
+@app.route("/api/brain/backfill", methods=["POST"])
+@upload_token_required
+def brain_backfill():
+    """Queues memory extraction for completed notes that predate this feature
+    (and embeddings for those missing one). Runs through the single job
+    worker so it never competes with transcription for the GPU."""
+    queued = 0
+    for meeting_id in brain_store.pending_memory_ids():
+        meeting = store.get(meeting_id)
+        if meeting:
+            _enqueue("memory", (meeting_id,))
+            queued += 1
+    return jsonify({"status": "ok", "queued": queued})
 
 
 @app.route("/api/digest", methods=["POST"])

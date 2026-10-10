@@ -54,3 +54,27 @@ This app is only as secure as the deployment around it:
 ## Swapping in a hosted transcription API
 
 If you'd rather not run Whisper at all, edit `transcribe_audio()` in `receive_and_transcribe.py` to call a hosted ASR API instead (OpenAI, Deepgram, AssemblyAI, etc.) - it just needs to return a text string. Nothing else in the file, nor the Docker setup, needs to change.
+
+## Second-brain features
+
+After the normal cleanup, each completed note also gets a structured *memory* (title, summary, people, decisions, facts, importance) and any tasks/appointments in it, with dates resolved server-side against LOCAL_TIMEZONE (the LLM only reports what was said; Python computes the absolute time). If extraction fails the note still completes and the original to-do extraction is used. See the second-brain block in .env.example.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/ask` `{"question"}` | Answer from your notes (keyword search; plus embeddings if `EMBEDDING_MODEL` is set) |
+| `GET /api/agenda`, `/api/briefing/daily`, `/api/briefing/weekly` | Appointments, due and overdue tasks, with speakable `text` |
+| `GET /api/calendar?from=&days=` | Dated open tasks/events |
+| `GET /api/recap?period=day|week|month` | LLM recap of recent notes |
+| `POST /api/todos/command` `{"text"}` | Voice-style "mark the dentist task done" |
+| `GET/POST /api/meetings/<id>/moments` | Marked moments (ms offsets) sent by the device |
+| `GET /api/meetings/<id>/memory` | Stored structured memory |
+| `POST /api/brain/backfill` | Queue memory extraction for notes that predate this feature |
+
+The dashboard has an **Ask** button (ask, today/week briefing, recap) and shows due dates in the to-do list. The `meeting-buddy-mcp` service gains `ask_notes`, `get_agenda`, `get_calendar` and `get_recap` tools. No new containers are required; semantic search just needs an embedding model pulled in your existing Ollama.
+
+## Device (PalaNote) additions
+
+* **Moments:** a short press of the power button during a recording marks that point; the offsets are uploaded with the note. Long-recording mode (`recordToggle`, up to `MAX_RECORDING_MINUTES`) is unchanged.
+* **Multiple Wi-Fi networks / volume** over USB serial (115200): `WIFI+ ssid|password`, `WIFI-ssid`, `WIFI?`, `VOL 10..100`, `STATUS`. With no stored profiles the device uses `secrets.h` exactly as before; it is always kept as the fallback.
+* **Index recovery:** `index.tmp` is used if power is lost mid-save.
+* Sleep, wake and battery code are untouched.
