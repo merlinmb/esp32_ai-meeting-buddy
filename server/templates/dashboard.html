@@ -484,7 +484,10 @@
   }
 
   /* ---------- To-do list modal ---------- */
-  .todo-modal { max-width: 560px; max-height: 80vh; display: flex; flex-direction: column; }
+  .todo-modal { width: 80vw; max-width: 80vw; max-height: 85vh; display: flex; flex-direction: column; }
+  .todo-tabs { display: flex; gap: 6px; margin: 4px 0 8px; border-bottom: 1px solid var(--border-soft); }
+  .todo-tab { background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-faint); padding: 6px 12px; cursor: pointer; font: inherit; font-size: 0.85rem; }
+  .todo-tab.active { color: inherit; border-bottom-color: currentColor; }
   .todo-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
   .todo-item {
     display: flex;
@@ -912,6 +915,10 @@
     <div class="audio-modal-header">
       <div class="audio-modal-title">To-do list</div>
       <button class="icon-btn" title="Close" onclick="closeTodosModal()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="todo-tabs">
+      <button class="todo-tab active" id="todoTabOpen" onclick="setTodoTab('open')">Open</button>
+      <button class="todo-tab" id="todoTabDone" onclick="setTodoTab('done')">Completed</button>
     </div>
     <div class="todo-list" id="todoList"></div>
   </div>
@@ -1504,7 +1511,8 @@ async function loadTodos() {
   try {
     const res = await fetch("/api/todos");
     const data = await res.json();
-    renderTodos(data.todos || []);
+    allTodos = data.todos || [];
+    renderTodos();
   } catch (e) {
     todoList.innerHTML = '<div class="todo-empty">Failed to load to-dos.</div>';
   }
@@ -1517,12 +1525,35 @@ function todoDueLabel(t) {
   const when = t.date_precision === "time" ? d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })
                                            : d.toLocaleDateString([], { dateStyle: "medium" });
   const kind = t.type && t.type !== "todo" ? t.type + " " : "";
-  return ` &middot; <i class="fa-regular fa-calendar"></i> ${escapeHtml(kind + when)}`;
+  return ` &middot; <i class="fa-regular fa-calendar"></i> Due ${escapeHtml(kind + when)}`;
 }
 
-function renderTodos(todos) {
+let allTodos = [];
+let todoTab = "open";
+
+function setTodoTab(tab) {
+  todoTab = tab;
+  renderTodos();
+}
+
+function todoRecordedLabel(t) {
+  const d = new Date(t.created_at);
+  if (!t.created_at || isNaN(d)) return "";
+  return ` &middot; <i class="fa-regular fa-clock"></i> Recorded ${escapeHtml(d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))}`;
+}
+
+function renderTodos() {
+  const showDone = todoTab === "done";
+  document.getElementById("todoTabOpen").classList.toggle("active", !showDone);
+  document.getElementById("todoTabDone").classList.toggle("active", showDone);
+  const openCount = allTodos.filter(t => !t.done).length;
+  document.getElementById("todoTabOpen").textContent = `Open (${openCount})`;
+  document.getElementById("todoTabDone").textContent = `Completed (${allTodos.length - openCount})`;
+  const todos = allTodos.filter(t => !!t.done === showDone);
   if (!todos.length) {
-    todoList.innerHTML = '<div class="todo-empty">No to-do items yet. Tag a recording as Note or Idea to have its tasks show up here.</div>';
+    todoList.innerHTML = showDone
+      ? '<div class="todo-empty">No completed items yet.</div>'
+      : '<div class="todo-empty">No open to-do items. Tag a recording as Note or Idea to have its tasks show up here.</div>';
     return;
   }
   todoList.innerHTML = todos.map(t => `
@@ -1530,13 +1561,15 @@ function renderTodos(todos) {
       <input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)">
       <div>
         <div class="todo-text" contenteditable="true" spellcheck="false" data-id="${t.id}" data-original="${escapeHtml(t.text)}" onblur="saveTodoText(this)" onkeydown="handleTodoTextKeydown(event, this)">${escapeHtml(t.text)}</div>
-        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}${todoDueLabel(t)}</div>
+        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}${todoRecordedLabel(t)}${todoDueLabel(t)}</div>
       </div>
     </div>
   `).join("");
 }
 
 async function toggleTodo(id, done) {
+  const item = allTodos.find(t => t.id === id);
+  if (item) { item.done = done ? 1 : 0; renderTodos(); }
   try {
     await fetch(`/api/todos/${id}`, {
       method: "POST",
@@ -1574,6 +1607,8 @@ async function saveTodoText(el) {
       body: JSON.stringify({ text }),
     });
     el.dataset.original = text;
+    const item = allTodos.find(t => t.id === Number(id));
+    if (item) item.text = text;
   } catch (e) {
     el.textContent = el.dataset.original;
   }

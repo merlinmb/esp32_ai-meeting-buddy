@@ -10,6 +10,7 @@
             "includePath": [
                 "E:/Development/AI/ai-meeting-buddy/PalaNote/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src",
+                "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Hash/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src",
@@ -386,7 +387,6 @@
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/OpenThread/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/PPP/src",
-                "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                 "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
@@ -404,6 +404,7 @@
                 "path": [
                     "E:/Development/AI/ai-meeting-buddy/PalaNote/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src",
+                    "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Hash/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src",
@@ -780,7 +781,6 @@
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/OpenThread/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/PPP/src",
-                    "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                     "C:/Users/merli/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
