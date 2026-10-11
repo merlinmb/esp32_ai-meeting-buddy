@@ -73,14 +73,46 @@
 
   .top-bar {
     display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
   }
   .brand {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
+  }
+  .brand-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .brand-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .brand-actions .btn,
+  .brand-header form .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    margin: 0;
+    padding: 6px 8px;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .brand-header form {
+    flex: 0 0 36px;
+    margin: 0;
+  }
+  .brand-actions .shortcut-link {
+    grid-column: 1 / -1;
   }
   .brand .mark {
     width: 32px;
@@ -117,7 +149,17 @@
 
   /* ---------- Record box ---------- */
   .record-box { display: flex; flex-direction: column; gap: 8px; }
-  .record-btn { width: 100%; padding: 12px 14px; font-size: 0.86rem; text-align: center; }
+  .record-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 42px;
+    margin: 0;
+    padding: 12px 14px;
+    font-size: 0.86rem;
+    text-align: center;
+  }
   .record-btn i { margin-right: 6px; }
   .record-btn.recording {
     background: linear-gradient(135deg, var(--err), #c23e51);
@@ -774,16 +816,20 @@
 <div class="app-shell">
   <div class="col-brand mobile-active" id="colBrand">
     <div class="top-bar">
-      <div class="brand">
-        <div class="mark"><i class="fa-solid fa-microphone"></i></div>
-        <div class="name">Meeting Buddy<small>Receiver console</small></div>
+      <div class="brand-header">
+        <div class="brand">
+          <div class="mark"><i class="fa-solid fa-microphone"></i></div>
+          <div class="name">Meeting Buddy<small>Receiver console</small></div>
+        </div>
+        <form method="post" action="/logout">
+          <button type="submit" class="btn" title="Sign out" aria-label="Sign out"><i class="fa-solid fa-right-from-bracket"></i></button>
+        </form>
       </div>
-      <button class="btn" id="askBtn" title="Ask your notes" style="margin-left:auto"><i class="fa-solid fa-comments"></i> Ask</button>
-      <button class="btn" id="todosBtn" title="To-do list"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
-      <a class="btn" href="/apple-shortcut/download" title="Download the iPhone Notes and Reminders Shortcut"><i class="fa-brands fa-apple"></i> iPhone Shortcut</a>
-      <form method="post" action="/logout">
-        <button type="submit" class="btn" title="Sign out"><i class="fa-solid fa-right-from-bracket"></i></button>
-      </form>
+      <div class="brand-actions">
+        <button class="btn" id="askBtn" title="Ask your notes"><i class="fa-solid fa-comments"></i> Ask</button>
+        <button class="btn" id="todosBtn" title="To-do list"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
+        <a class="btn shortcut-link" href="/apple-shortcut/download" title="Download the iPhone Notes and Reminders Shortcut"><i class="fa-brands fa-apple"></i> iPhone Shortcut</a>
+      </div>
     </div>
 
     <div class="record-box">
