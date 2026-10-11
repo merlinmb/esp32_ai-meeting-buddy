@@ -795,7 +795,7 @@ def _do_retitle(meeting_id: int):
                     else "Write it in the language of the note.")
         prompt = (
             "Give this voice note a friendly headline of 3-7 words, max 60 characters, "
-            "naming its actual subject (e.g. \"Portugal partnership cost discussion\"). "
+            "naming the specific subject of THIS note, not something generic. "
             f"No dates, quotes or trailing punctuation. {language} "
             "Reply with the headline only.\n\nNote:\n---\n" + body[:6000] + "\n---\n"
         )

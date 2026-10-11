@@ -197,7 +197,7 @@ Preserve every fact and the original meaning. Never infer unsupported details.
 
 Reply with ONE JSON object and nothing else, with exactly these keys:
   "title": friendly headline of 3-7 words, max 60 characters, naming the actual subject
-           (e.g. "Portugal partnership cost discussion"); no dates, quotes or trailing punctuation (string)
+           (specific to THIS note's content, not generic); no dates, quotes or trailing punctuation (string)
   "summary": compact factual summary (string)
   "importance": 0 fleeting, 1 normal, 2 important, 3 critical (integer)
   "topics", "people", "projects", "decisions", "facts", "questions": arrays of short strings
