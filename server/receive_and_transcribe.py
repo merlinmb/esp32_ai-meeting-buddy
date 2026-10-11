@@ -49,6 +49,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import brain
+from apple_shortcut import build_shortcut
 from db import (MeetingStore, TodoStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
                 STATUS_COMPLETED, DEFAULT_TAG)
 
@@ -75,11 +76,10 @@ BEHIND_HTTPS_PROXY = os.environ.get("BEHIND_HTTPS_PROXY", "false").lower() == "t
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", "")
-# Separate, weaker credential for pulling the to-do list into an external
-# report: read-only (GET /api/todos only) and safe to hand to a script that
-# shouldn't also be able to upload recordings or mark todos done. Optional -
-# if unset, that endpoint just isn't reachable by token (session login still
-# works).
+# Separate, weaker credential for read-only external integrations. It can
+# read dashboard summaries, agenda/calendar/briefing data, todos, and the
+# Apple Shortcut export endpoint (which includes note content); it cannot
+# upload recordings or change notes or todos.
 TODOS_READ_TOKEN = os.environ.get("TODOS_READ_TOKEN", "")
 FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "")
 
@@ -232,11 +232,7 @@ def upload_token_required(view):
 
 
 def todos_read_token_required(view):
-    """Read-only gate for GET /api/todos and GET /api/stats: accepts the full
-    UPLOAD_TOKEN (so existing integrations keep working), the narrower
-    TODOS_READ_TOKEN, or a browser session - but grants no access to
-    anything else, so a report script holding only TODOS_READ_TOKEN can't
-    upload, mark todos done, or reach any other endpoint."""
+    """Read-only gate for designated report, agenda, and export endpoints."""
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
         if session.get("logged_in"):
@@ -1513,6 +1509,47 @@ def list_notes():
             note["content"] = text
         notes.append(note)
     return jsonify({"count": len(notes), "notes": notes})
+
+
+@app.route("/api/apple-shortcut/data", methods=["GET"])
+@todos_read_token_required
+def apple_shortcut_data():
+    """Read-only payload for the Apple Notes and Reminders Shortcut."""
+    notes = []
+    for meeting in select_notes():
+        content = note_text(meeting)
+        if content is None:
+            continue
+        note = note_summary(meeting)
+        note["content"] = content
+        notes.append(note)
+    todos = todo_store.list_all(done=False)
+    response = jsonify({
+        "notes": notes,
+        "todos": [todo_summary(todo) for todo in todos],
+    })
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.route("/apple-shortcut/download", methods=["GET"])
+@login_required
+def download_apple_shortcut():
+    """Download a personalized, unsigned .shortcut file for the logged-in user."""
+    if not TODOS_READ_TOKEN:
+        return jsonify({
+            "error": "Set TODOS_READ_TOKEN in the server .env before downloading the Shortcut."
+        }), 503
+    shortcut = build_shortcut(TODOS_READ_TOKEN)
+    response = send_file(
+        io.BytesIO(shortcut),
+        mimetype="application/x-apple-shortcut",
+        as_attachment=True,
+        download_name="AI-Meeting-Buddy-Sync.shortcut",
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.route("/api/notes/<int:meeting_id>", methods=["GET"])

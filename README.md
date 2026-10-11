@@ -36,6 +36,7 @@ The AI Meeting Buddy combines embedded recording hardware with a companion trans
 │
 ├── server/                # Transcription & Claude pipeline
 │   ├── receive_and_transcribe.py  # Upload receiver + transcription + Claude processing
+│   ├── apple_shortcut.py  # Generates the iPhone Notes and Reminders Shortcut
 │   ├── docker-compose.yml         # Container orchestration
 │   ├── deploy.sh                  # SSH-based deployment to remote Docker host
 │   ├── Dockerfile                 # Container image definition
