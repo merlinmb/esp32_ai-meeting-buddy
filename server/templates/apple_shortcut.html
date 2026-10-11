@@ -19,6 +19,9 @@
   code, .copy { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:1px 6px; color:var(--text); word-break:break-all; }
   .copy { display:block; padding:10px 12px; margin:6px 0 12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.85rem; }
   .warn { color:var(--err); }
+  button { background:var(--accent); color:#0a0b10; border:0; border-radius:8px; padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  #retitleStatus { margin-left:10px; color:var(--dim); }
 </style>
 </head>
 <body>
@@ -50,6 +53,29 @@
   <h2>Use it</h2>
   <p>Run it once and allow Notes and Reminders access. For automatic syncing, add a personal <b>Time of Day</b> automation that runs the shortcut.</p>
   <p>One-way import: edits or completion in Apple apps don't come back. Add <code>?peek=1</code> to the URL to test without marking items as sent, or <code>?reset=1</code> once to resend everything (delete already-imported items first, or they'll be duplicated).</p>
+
+  <h2>Regenerate note titles</h2>
+  <p>Re-titles every finished note from its content (the original recording ID stays as its internal key). Only titles and note headings change; tasks are untouched. It runs in the background, so titles appear on the dashboard over the next few minutes.</p>
+  <p>After it finishes, delete the old notes on your iPhone and run the shortcut with <code>?reset=1</code> on the URL once so they come back under their new titles.</p>
+  <button id="retitleBtn" type="button">Regenerate all titles</button><span id="retitleStatus"></span>
 </main>
+<script>
+document.getElementById("retitleBtn").addEventListener("click", async function () {
+  if (!confirm("Regenerate titles for all finished notes?")) return;
+  const status = document.getElementById("retitleStatus");
+  this.disabled = true;
+  status.textContent = "Queuing...";
+  try {
+    const r = await fetch("/api/brain/retitle", { method: "POST" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    status.textContent = "Queued " + d.queued + " note(s).";
+  } catch (e) {
+    status.textContent = "Failed: " + e.message;
+  } finally {
+    this.disabled = false;
+  }
+});
+</script>
 </body>
 </html>
