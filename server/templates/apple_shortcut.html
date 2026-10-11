@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Meeting Buddy - iPhone sync</title>
+<style>
+  :root { --bg:#0a0b10; --panel:#14161f; --border:#262a38; --text:#eef0f6; --dim:#9aa1b5; --accent:#8b7bff; --err:#ff5c72; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text);
+         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; line-height:1.5; }
+  main { max-width:640px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  h2 { font-size:1.05rem; margin:28px 0 8px; }
+  p, li { color:var(--dim); }
+  a { color:var(--accent); }
+  ol { padding-left:22px; }
+  li { margin-bottom:8px; }
+  code, .copy { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:1px 6px; color:var(--text); word-break:break-all; }
+  .copy { display:block; padding:10px 12px; margin:6px 0 12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.85rem; }
+  .warn { color:var(--err); }
+</style>
+</head>
+<body>
+<main>
+  <p><a href="/">&larr; Dashboard</a></p>
+  <h1>Sync notes and tasks to iPhone</h1>
+  <p>Apple only imports <em>signed</em> shortcuts, which this server can't produce, so you build this short one once in the Shortcuts app. The server remembers what it has already sent, so the shortcut needs no duplicate checks: each run returns only new notes and open tasks.</p>
+
+  <h2>Values to use</h2>
+  <p>URL:</p>
+  <div class="copy">{{ pending_url }}</div>
+  <p>Header <code>X-Upload-Token</code>:</p>
+  {% if token %}
+  <div class="copy">{{ token }}</div>
+  <p>This read-only token can't change notes or tasks. Anyone with the shortcut can read your notes; revoke it by changing <code>TODOS_READ_TOKEN</code> in the server <code>.env</code>.</p>
+  {% else %}
+  <p class="warn">TODOS_READ_TOKEN is not set in the server .env. Set it and redeploy, then reload this page.</p>
+  {% endif %}
+
+  <h2>Build the shortcut (iPhone Shortcuts app &rarr; +)</h2>
+  <ol>
+    <li><b>Get Contents of URL</b>: paste the URL, expand <i>Show More</i>, set Method <b>GET</b>, and add header <code>X-Upload-Token</code> with the token above.</li>
+    <li><b>Get Dictionary from Input</b> (input: Contents of URL). Name this result by long-pressing it if needed; the next steps all read from it.</li>
+    <li><b>Get Dictionary Value</b>: key <code>notes</code>, then <b>Repeat with Each</b> on the result. Inside: <b>Get Dictionary Value</b> key <code>text</code> from <i>Repeat Item</i>, then <b>Create Note</b> with that value.</li>
+    <li>Add another <b>Get Dictionary Value</b> (key <code>todos</code>, from the dictionary in step 2), then <b>Repeat with Each</b>. Inside: <b>Get Dictionary Value</b> key <code>text</code> from <i>Repeat Item</i>, then <b>Add New Reminder</b> with that value as the title.</li>
+    <li>Add a third <b>Get Dictionary Value</b> (key <code>dated_todos</code>), then <b>Repeat with Each</b>. Inside: <b>Get Dictionary Value</b> key <code>text</code> and another with key <code>due_utc</code> from <i>Repeat Item</i>; run <b>Get Dates from Input</b> on the <code>due_utc</code> value; then <b>Add New Reminder</b> with the text as title and that date as the Due Date.</li>
+  </ol>
+
+  <h2>Use it</h2>
+  <p>Run it once and allow Notes and Reminders access. For automatic syncing, add a personal <b>Time of Day</b> automation that runs the shortcut.</p>
+  <p>One-way import: edits or completion in Apple apps don't come back. Add <code>?peek=1</code> to the URL to test without marking items as sent, or <code>?reset=1</code> once to resend everything (delete already-imported items first, or they'll be duplicated).</p>
+</main>
+</body>
+</html>

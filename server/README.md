@@ -64,7 +64,7 @@ After the normal cleanup, each completed note also gets a structured *memory* (t
 | `POST /api/ask` `{"question"}` | Answer from your notes (keyword search; plus embeddings if `EMBEDDING_MODEL` is set) |
 | `GET /api/agenda`, `/api/briefing/daily`, `/api/briefing/weekly` | Appointments, due and overdue tasks, with speakable `text` |
 | `GET /api/calendar?from=&days=` | Dated open tasks/events |
-| `GET /api/apple-shortcut/data` | Read-only payload for the generated Apple Shortcut; includes note content and open tasks and accepts `TODOS_READ_TOKEN` |
+| `GET /api/apple-shortcut/pending` | Notes and open tasks not yet sent to the Apple Shortcut (marks them sent; `?peek=1` doesn't, `?reset=1` resends everything); accepts `TODOS_READ_TOKEN` |
 | `GET /api/recap?period=day|week|month` | LLM recap of recent notes |
 | `POST /api/todos/command` `{"text"}` | Voice-style "mark the dentist task done" |
 | `GET/POST /api/meetings/<id>/moments` | Marked moments (ms offsets) sent by the device |
@@ -75,57 +75,15 @@ The dashboard has an **Ask** button (ask, today/week briefing, recap) and shows 
 
 ## Import notes and tasks into Apple Notes and Reminders
 
-The dashboard can generate a personalized iPhone Shortcut that imports completed, unarchived notes into Apple Notes and open tasks into Reminders. It uses `https://meetings.mgbeets.com` and embeds `TODOS_READ_TOKEN` in the Shortcut's request header.
+iOS only imports *signed* shortcuts, and signing needs macOS, so the server can't hand you a ready-made `.shortcut`. Instead the server tracks what it has already sent, which keeps the shortcut you build on the iPhone down to a few actions.
 
-1. Set a long random `TODOS_READ_TOKEN` in the server's `.env` and redeploy. This token can read the server's read-only report/agenda endpoints and the dedicated Apple export payload (including note content), but cannot upload recordings or change notes or tasks. Keep it private.
-2. On the iPhone, open Safari and sign in to `https://meetings.mgbeets.com` with the dashboard account.
-3. From the dashboard, tap **iPhone Shortcut**, or navigate to `https://meetings.mgbeets.com/apple-shortcut/download`. The authenticated endpoint generates the `.shortcut` file with the configured read token embedded; if the read token is unset, the server explains how to enable it.
-4. Open the downloaded file and follow iOS's Shortcuts import prompts. Review its actions and allow access to Notes and Reminders when asked. If iOS blocks importing an unsigned shortcut on your version, this download cannot bypass Apple's trust checks; use Apple's supported sharing/import flow or create and trust the shortcut in the Shortcuts app.
-5. Run **AI Meeting Buddy Sync** once to test it. For automatic imports, create a personal automation in Shortcuts and select this shortcut.
+1. Set a long random `TODOS_READ_TOKEN` in `.env` and redeploy. It can read the sync endpoint (which includes note content) but cannot upload recordings or change notes or tasks.
+2. Sign in to the dashboard on the iPhone and tap **iPhone Shortcut**. The page shows your URL and token and the steps for building the shortcut in the Shortcuts app.
+3. Run the shortcut, or schedule it with a **Time of Day** personal automation.
 
-The generated Shortcut uses stable Meeting Buddy IDs to avoid creating duplicates on later runs. It creates reminders with due dates when the server has a due time. This is a **one-way import**: edits, deletions, and completion in Apple apps do not sync back, and server-side edits do not update already imported Apple items. The embedded token is readable by anyone who can access the Shortcut on the iPhone; revoke it by changing `TODOS_READ_TOKEN` and downloading the Shortcut again.
+`GET /api/apple-shortcut/pending` returns `{notes, todos, dated_todos}`: completed, unarchived notes and open tasks that have not been sent before (`dated_todos` are the tasks with a `due_utc`). Everything returned is marked as sent, so the next call returns only new items; add `?peek=1` to look without marking. If a run fails after the fetch (for example, a permission prompt was declined) those items are not re-sent; open the endpoint once with `?reset=1` to forget everything sent so far and get it all again. Items already imported will be created a second time, so delete them from Notes/Reminders first.
 
-The following manual setup is an alternative if you prefer to build the Shortcut yourself.
-
-### 1. Make the server reachable from your iPhone
-
-For a home deployment, connect the iPhone to the same Wi-Fi as `savage.local` and use `http://savage.local:8787` as the server address. If that name does not resolve on the iPhone, use the server's LAN IP address instead.
-
-For access away from home, use a VPN into your home network or put the server behind an HTTPS reverse proxy. Do not expose the server over plain HTTP to the public internet: the Shortcut sends its API token with every request.
-
-### 2. Prepare API tokens
-
-The notes endpoint requires `UPLOAD_TOKEN`. The tasks endpoint accepts either `UPLOAD_TOKEN` or the narrower, read-only `TODOS_READ_TOKEN`. For better separation, set a long random `TODOS_READ_TOKEN` in the server's `.env`, then redeploy the service so it takes effect. Keep both tokens private; do not share the Shortcut if it contains them.
-
-Use the `UPLOAD_TOKEN` for the notes request, and the `TODOS_READ_TOKEN` for the tasks request. If you have not configured `TODOS_READ_TOKEN`, use `UPLOAD_TOKEN` for both requests instead.
-
-### 3. Create the Shortcut
-
-On the iPhone, open **Shortcuts**, tap **+**, and create a shortcut such as **Import Meeting Buddy**. Add these actions in order:
-
-1. Add **URL** and enter `https://your-server.example/api/notes?include=content` (replace the host with the address from step 1; use `http://savage.local:8787` for a trusted home-network-only setup).
-2. Add **Get Contents of URL**. Set the method to **GET**. Under **Headers**, add `X-Upload-Token` with the server's `UPLOAD_TOKEN` value.
-3. Turn the response into a list of notes:
-   - Search actions for **Get Dictionary from Input** and add it after **Get Contents of URL**. Its input should be the output of **Get Contents of URL** (shown as a blue variable/magic-variable token). If Shortcuts did not fill this in automatically, tap the input and select **Contents of URL**.
-   - Add **Get Dictionary Value** after it. Set the key to `notes` and the dictionary to the output of **Get Dictionary from Input**. This action's output is the notes list.
-   - Add **Repeat with Each** after that and use the output of **Get Dictionary Value** as its input. Everything added between **Repeat with Each** and **End Repeat** runs once per note; **Repeat Item** is the current note dictionary.
-   - Important: `id`, `name`, and `content` are **dictionary keys**, not variables shown in the picker. To retrieve one, add **Get Dictionary Value**, set its key by typing `id` literally, and set its dictionary/input to the blue **Repeat Item** variable. The action's result is that note's ID.
-   - To make that result easy to reuse, add **Set Variable** immediately after the lookup and name it `Note ID`. Repeat the same two actions for the other fields: **Get Dictionary Value** with key `name` from **Repeat Item**, then **Set Variable** named `Note Name`; and key `content` from **Repeat Item**, then **Set Variable** named `Note Content`. Type the keys into the action; do not look for them in the variable picker.
-   - To choose **Repeat Item** for the dictionary input, tap that input field, tap **Select Variable** (or the variable/magic-variable button above the keyboard), then choose **Repeat Item**. To save a lookup result, add **Set Variable** immediately after the lookup, tap the variable-name field in that action, and type the name above. Its input should be the lookup's result; if needed, tap the input and choose the preceding **Get Dictionary Value** action's output in the variable picker.
-4. Add the following actions **inside** the notes' **Repeat with Each** block, after the three **Set Variable** actions:
-   - Add **Text**. Type `[Meeting Buddy #`, insert the `Note ID` variable using the variable picker, then type `]`. To insert it, tap the Text action where the variable should go, open **Select Variable**, and choose **Note ID**. For note ID 42, this produces `[Meeting Buddy #42]`.
-   - Add **Find Notes** and filter **Name** **contains** the marker. Tap the filter's value and insert the output of the marker **Text** action from the variable picker.
-   - Add **Count** to count the results from **Find Notes**, then add **If** and set the condition to **Count** **is** `0`. This means no note with the marker was found. In the **If** branch, add a **Text** action: type `Meeting Buddy - `, insert `Note Name`, type a space, insert the marker output, press Return twice, then insert `Note Content`. Use the variable picker for each insertion; do not type variable names or angle-bracket placeholders as text. Add **Create Note** under this Text action, use the Text output as its body, and choose the Notes folder. Leave the **Otherwise** branch empty; an existing matching note is skipped.
-   - Keep the **Find Notes**, **Count**, **If**, and **Create Note** actions before the notes' **End Repeat**, so they run once for each server note.
-5. After the notes repeat, add another **URL** action for `https://your-server.example/api/todos?done=0`, followed by **Get Contents of URL** configured as **GET**. Set `X-Upload-Token` to the `TODOS_READ_TOKEN` (or `UPLOAD_TOKEN` if you did not configure the read-only token).
-6. Parse the tasks response the same way as the notes response: add **Get Dictionary from Input** after the second **Get Contents of URL**, then **Get Dictionary Value** with key `todos`, then **Repeat with Each** using that action's output. Inside the task repeat, retrieve fields by adding **Get Dictionary Value**, setting its dictionary to **Repeat Item** and typing the key (`id`, `text`, `meeting_name`, or `due_utc`) into the key field. These are literal keys, not variables to select. Follow each lookup with **Set Variable** (for example, `Task ID`, `Task Text`, `Meeting Name`, `Due UTC`) if you need to reuse its result. Build the reminder title with a **Text** action by inserting `Task Text`, typing ` [Meeting Buddy #`, inserting `Task ID`, and typing `]`. Use **Find Reminders** to look for a reminder whose title contains this marker, then **Count** and create a reminder only when the count is `0`. When `due_utc` is not empty, pass the `Due UTC` variable through **Get Dates from Input** and use the resulting date for the reminder's due date; otherwise leave the due date unset. The API time is UTC, and iOS displays it in the phone's local time zone. You can include `Meeting Name` in the reminder's notes for context.
-7. Run the Shortcut once and approve its access to the server, Notes, and Reminders when iOS prompts you. Check the results in the selected Notes folder and in Reminders.
-
-The note API returns completed, unarchived notes, including their processed Markdown bodies. The task API returns open tasks only; tasks already marked done in Meeting Buddy are excluded. To import completed tasks too, remove `?done=0`, but they will be created as active Reminders unless you add a separate completion-state check.
-
-### 4. Run it automatically (optional)
-
-In **Shortcuts → Automation**, create a **Time of Day** personal automation, choose a schedule, and select **Run Shortcut → Import Meeting Buddy**. Keep the marker-based **Find** checks in the Shortcut so each scheduled run creates only newly seen items. Existing Apple items are not refreshed from the server, and completing a Reminder does not mark the Meeting Buddy task done.
+This is a **one-way import**: edits, deletions, and completion in Apple apps do not sync back, and later server-side edits do not update items already imported. The token is readable by anyone who can open the shortcut; revoke it by changing `TODOS_READ_TOKEN`.
 
 ## Device (PalaNote) additions
 

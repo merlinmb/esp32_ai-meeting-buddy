@@ -196,7 +196,8 @@ def build_memory_prompt(text: str, meeting: dict, captured_utc: datetime, tz, la
 Preserve every fact and the original meaning. Never infer unsupported details.
 
 Reply with ONE JSON object and nothing else, with exactly these keys:
-  "title": short specific title (string)
+  "title": friendly headline of 3-7 words, max 60 characters, naming the actual subject
+           (e.g. "Portugal partnership cost discussion"); no dates, quotes or trailing punctuation (string)
   "summary": compact factual summary (string)
   "importance": 0 fleeting, 1 normal, 2 important, 3 critical (integer)
   "topics", "people", "projects", "decisions", "facts", "questions": arrays of short strings
@@ -342,6 +343,22 @@ class BrainStore:
                  json.dumps(memory, ensure_ascii=False), _now_iso(), meeting_id),
             )
 
+    def set_title(self, meeting_id: int, title: str):
+        """Replaces just the title, keeping the title inside memory_json in
+        step so retrieval and the dashboard agree."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT memory_json FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+            memory_json = row["memory_json"] if row else None
+            if memory_json:
+                try:
+                    memory = json.loads(memory_json)
+                    memory["title"] = title
+                    memory_json = json.dumps(memory, ensure_ascii=False)
+                except ValueError:
+                    pass
+            conn.execute("UPDATE meetings SET title = ?, memory_json = ? WHERE id = ?",
+                         (title, memory_json, meeting_id))
+
     def get_memory(self, meeting_id: int):
         with self._connect() as conn:
             row = conn.execute("SELECT memory_json FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
@@ -430,7 +447,7 @@ class BrainStore:
         """Open dated tasks/events whose due time is in [start, end)."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT todos.*, meetings.meeting_name, meetings.tag FROM todos "
+                "SELECT todos.*, meetings.meeting_name, meetings.title AS meeting_title, meetings.tag FROM todos "
                 "JOIN meetings ON meetings.id = todos.meeting_id "
                 "WHERE meetings.archived = 0 AND todos.done = 0 AND todos.due_utc IS NOT NULL "
                 "AND todos.due_utc >= ? AND todos.due_utc < ? ORDER BY todos.due_utc",
@@ -440,7 +457,7 @@ class BrainStore:
     def open_tasks(self):
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT todos.*, meetings.meeting_name, meetings.tag FROM todos "
+                "SELECT todos.*, meetings.meeting_name, meetings.title AS meeting_title, meetings.tag FROM todos "
                 "JOIN meetings ON meetings.id = todos.meeting_id "
                 "WHERE meetings.archived = 0 AND todos.done = 0 ORDER BY todos.id DESC").fetchall()
         return [dict(r) for r in rows]

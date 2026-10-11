@@ -12,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY receive_and_transcribe.py db.py brain.py apple_shortcut.py ./
+COPY receive_and_transcribe.py db.py brain.py ./
 COPY templates ./templates
 
 EXPOSE 8787

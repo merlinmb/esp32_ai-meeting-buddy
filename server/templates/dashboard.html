@@ -828,7 +828,7 @@
       <div class="brand-actions">
         <button class="btn" id="askBtn" title="Ask your notes"><i class="fa-solid fa-comments"></i> Ask</button>
         <button class="btn" id="todosBtn" title="To-do list"><i class="fa-solid fa-list-check"></i> <span id="todosBtnLabel">To-dos</span></button>
-        <a class="btn shortcut-link" href="/apple-shortcut/download" title="Download the iPhone Notes and Reminders Shortcut"><i class="fa-brands fa-apple"></i> iPhone Shortcut</a>
+        <a class="btn shortcut-link" href="/apple-shortcut" title="Set up iPhone Notes and Reminders sync"><i class="fa-brands fa-apple"></i> iPhone Shortcut</a>
       </div>
     </div>
 
@@ -1065,6 +1065,13 @@ function fmtDuration(seconds) {
 
 // Device filenames look like "MEETING_YYYYMMDD_HHMMSS" (from the ESP32's RTC) -
 // that's the actual recording time, distinct from when the server received the upload.
+// Friendly content-based title when one exists; the device filename
+// (meeting_name) stays the fallback and the key for recorded-at parsing.
+function meetingTitle(id, fallbackName) {
+  const m = allMeetings.find(x => x.id === id);
+  return (m && m.title && m.title.trim()) || fallbackName;
+}
+
 function parseRecordedAt(meetingName) {
   const m = /^MEETING_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(meetingName);
   if (!m) return null;
@@ -1190,8 +1197,8 @@ function renderTable() {
     const canRetranscribe = status === "failed" && !m.raw_transcript;
     return `
       <tr id="row-${m.id}" class="${m.id === currentMeetingId ? 'active' : ''}" onclick="rowClicked(event, ${m.id})">
-        <td class="name">
-          ${escapeHtml(m.meeting_name)}
+        <td class="name" title="${escapeAttr(m.meeting_name)}">
+          ${escapeHtml(meetingTitle(m.id, m.meeting_name))}
           <div class="sz">${fmtBytes(m.wav_bytes)}${fmtDuration(m.duration_seconds) ? " · " + fmtDuration(m.duration_seconds) : ""}</div>
         </td>
         <td>
@@ -1210,7 +1217,7 @@ function renderTable() {
         <td class="time col-secondary">${fmtTime(m.updated_at)}</td>
         <td class="actions">
           <div class="actions-row">
-            <button class="icon-btn table-icon-btn" title="Play back the original recording" onclick="event.stopPropagation(); playAudio(${m.id}, '${escapeAttr(m.meeting_name)}')"><i class="fa-solid fa-play"></i></button>
+            <button class="icon-btn table-icon-btn" title="Play back the original recording" onclick="event.stopPropagation(); playAudio(${m.id}, '${escapeAttr(meetingTitle(m.id, m.meeting_name))}')"><i class="fa-solid fa-play"></i></button>
             <button class="icon-btn table-icon-btn" ${canRetry ? "" : "disabled"} title="View raw transcript (Whisper output)" onclick="event.stopPropagation(); viewRawTranscript(${m.id}, '${escapeAttr(m.meeting_name)}')"><i class="fa-solid fa-microphone-lines"></i></button>
             ${m.archived
               ? `<button class="icon-btn table-icon-btn" title="Restore from archive" onclick="event.stopPropagation(); unarchiveMeeting(${m.id})"><i class="fa-solid fa-box-open"></i></button>`
@@ -1413,7 +1420,7 @@ async function viewTranscript(id, name) {
   document.getElementById("detailHeader").style.display = "flex";
   document.getElementById("detailEmailBar").style.display = "flex";
   document.getElementById("detailBody").style.display = "flex";
-  document.getElementById("detailTitle").textContent = name;
+  document.getElementById("detailTitle").textContent = meetingTitle(id, name);
   const meeting = allMeetings.find(x => x.id === id);
   const recordedAt = parseRecordedAt(name);
   const parts = [];
@@ -1448,7 +1455,7 @@ async function viewRawTranscript(id, name) {
   document.getElementById("detailHeader").style.display = "flex";
   document.getElementById("detailEmailBar").style.display = "flex";
   document.getElementById("detailBody").style.display = "flex";
-  document.getElementById("detailTitle").textContent = name;
+  document.getElementById("detailTitle").textContent = meetingTitle(id, name);
   document.getElementById("detailRecorded").textContent = "Raw Whisper output · read-only";
   const editor = document.getElementById("transcriptEditor");
   const cards = document.getElementById("detailCards");
@@ -1608,7 +1615,7 @@ function renderTodos() {
       <input type="checkbox" ${t.done ? "checked" : ""} onchange="toggleTodo(${t.id}, this.checked)">
       <div>
         <div class="todo-text" contenteditable="true" spellcheck="false" data-id="${t.id}" data-original="${escapeHtml(t.text)}" onblur="saveTodoText(this)" onkeydown="handleTodoTextKeydown(event, this)">${escapeHtml(t.text)}</div>
-        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_name)}${todoRecordedLabel(t)}${todoDueLabel(t)}</div>
+        <div class="todo-meta">${escapeHtml(t.tag)} &middot; ${escapeHtml(t.meeting_title || t.meeting_name)}${todoRecordedLabel(t)}${todoDueLabel(t)}</div>
       </div>
     </div>
   `).join("");

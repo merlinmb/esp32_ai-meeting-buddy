@@ -71,6 +71,8 @@ def init_db(db_path: Path):
         # go, which is exactly the repeated-notes problem the digest exists to
         # avoid.
         conn.execute("UPDATE meetings SET emailed_at = ?", (_now_iso(),))
+    if "apple_exported_at" not in columns:
+        conn.execute("ALTER TABLE meetings ADD COLUMN apple_exported_at TEXT")
     for name, ddl in _MEETING_MEMORY_COLUMNS:
         if name not in columns:
             conn.execute(f"ALTER TABLE meetings ADD COLUMN {name} {ddl}")
@@ -101,6 +103,7 @@ _TODO_COLUMNS = [
     ("date_precision", "TEXT NOT NULL DEFAULT 'none'"),
     ("confidence", "INTEGER"),
     ("original_time_text", "TEXT"),
+    ("apple_exported_at", "TEXT"),
 ]
 
 _MOMENTS_SCHEMA = """
@@ -227,6 +230,26 @@ class MeetingStore:
                 [now, *ids],
             )
 
+    def mark_apple_exported(self, meeting_ids):
+        """Records that the Apple Shortcut has been handed these notes, so the
+        next sync only returns new ones. updated_at is left alone, as with
+        mark_emailed."""
+        ids = list(meeting_ids)
+        if not ids:
+            return
+        now = _now_iso()
+        placeholders = ",".join("?" * len(ids))
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE meetings SET apple_exported_at = ? WHERE id IN ({placeholders})",
+                [now, *ids],
+            )
+
+    def clear_apple_exported(self):
+        """Forgets every Apple export so the next sync returns everything."""
+        with self._connect() as conn:
+            conn.execute("UPDATE meetings SET apple_exported_at = NULL")
+
     def list_pending_digest(self, exclude_tags=()):
         """Completed, unarchived recordings that have never been emailed,
         oldest first so the digest reads in the order things were recorded.
@@ -351,7 +374,8 @@ class TodoStore:
 
     def list_all(self, done: bool = None):
         sql = (
-            "SELECT todos.*, meetings.meeting_name, meetings.tag, meetings.archived "
+            "SELECT todos.*, meetings.meeting_name, meetings.title AS meeting_title, "
+            "meetings.tag, meetings.archived "
             "FROM todos JOIN meetings ON meetings.id = todos.meeting_id "
             "WHERE meetings.archived = 0"
         )
@@ -362,6 +386,22 @@ class TodoStore:
         sql += " ORDER BY todos.id DESC"
         with self._connect() as conn:
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+    def clear_apple_exported(self):
+        with self._connect() as conn:
+            conn.execute("UPDATE todos SET apple_exported_at = NULL")
+
+    def mark_apple_exported(self, todo_ids):
+        ids = list(todo_ids)
+        if not ids:
+            return
+        now = _now_iso()
+        placeholders = ",".join("?" * len(ids))
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE todos SET apple_exported_at = ? WHERE id IN ({placeholders})",
+                [now, *ids],
+            )
 
     def get(self, todo_id: int):
         with self._connect() as conn:

@@ -49,7 +49,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import brain
-from apple_shortcut import build_shortcut
 from db import (MeetingStore, TodoStore, STATUS_TRANSCRIBING, STATUS_SUMMARIZING, STATUS_FAILED,
                 STATUS_COMPLETED, DEFAULT_TAG)
 
@@ -559,6 +558,22 @@ def send_email_to(to_address: str, subject: str, body_markdown: str):
 # ---------------------------------------------------------------------------
 
 
+def display_title(meeting: dict) -> str:
+    """The friendly, content-based title for a recording, falling back to the
+    device filename (MEETING_YYYYMMDD_HHMMSS) when none has been generated.
+    meeting_name stays the stable identifier - it keys uploads, audio files
+    and recorded-at parsing - while this is only ever for people to read."""
+    return (meeting.get("title") or "").strip() or meeting["meeting_name"]
+
+
+def safe_filename(title: str) -> str:
+    """A title made safe to use in a download filename or Content-Disposition
+    header: no path separators, quotes or control characters."""
+    cleaned = re.sub(r'[\/:*?"<>|\x00-\x1f]+', " ", title)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned[:80] or "note"
+
+
 def _local_time(iso_ts: str) -> str:
     """Renders a stored UTC timestamp in the server's local time. The stored
     format is what db._now_iso writes; anything unexpected is passed through
@@ -567,6 +582,15 @@ def _local_time(iso_ts: str) -> str:
         return datetime.fromisoformat(iso_ts).astimezone().strftime("%Y-%m-%d %H:%M")
     except (TypeError, ValueError):
         return iso_ts or "?"
+
+
+def _strip_title_heading(text: str) -> str:
+    """Drops the leading "# title" line run_summarize_and_save writes."""
+    text = text.strip()
+    lines = text.split("\n")
+    if lines and lines[0].startswith("# "):
+        return "\n".join(lines[1:]).strip()
+    return text
 
 
 def _read_note_body(meeting: dict) -> str:
@@ -600,7 +624,7 @@ def build_digest_body(meetings: list) -> str:
     for tag, items in sorted(by_tag.items()):
         for m in items:
             # Escape pipes so a note name can't break the table layout.
-            name = (m["meeting_name"] or "").replace("|", r"\|")
+            name = display_title(m).replace("|", r"\|")
             parts.append(f"| {tag} | {_local_time(m['received_at'])} | {name} |")
 
     for tag, items in sorted(by_tag.items()):
@@ -608,7 +632,7 @@ def build_digest_body(meetings: list) -> str:
         for m in items:
             parts += [
                 "",
-                f"## {m['meeting_name']}  -  {_local_time(m['received_at'])}",
+                f"## {display_title(m)}  -  {_local_time(m['received_at'])}",
                 "",
                 _read_note_body(m),
             ]
@@ -663,8 +687,17 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
     store.update_status(meeting_id, STATUS_SUMMARIZING)
     cleaned_markdown = clean_up_transcript(raw_transcript, meeting_name, tag)
 
+    # Regenerated from scratch every time this runs (initial upload, retry,
+    # or a retag that lands back on a to-do tag) so a resubmission can't
+    # leave duplicate or stale items behind. Done before the file and email
+    # are written because it produces the friendly title they both carry.
+    build_memory_and_tasks(meeting_id, cleaned_markdown, tag)
+    title = display_title(store.get(meeting_id) or {"meeting_name": meeting_name})
+
+    # The filename keeps the stable name + id so it stays unique and
+    # predictable; only the heading inside shows the friendly title.
     out_path = OUTPUT_DIR / f"{meeting_name}_{meeting_id}.md"
-    out_path.write_text(f"# {meeting_name}\n\n{cleaned_markdown}\n", encoding="utf-8")
+    out_path.write_text(f"# {title}\n\n{cleaned_markdown}\n", encoding="utf-8")
     logging.info(f"Wrote transcript: {out_path}")
 
     # Tags in IMMEDIATE_EMAIL_TAGS go out on their own the moment they are
@@ -672,13 +705,8 @@ def run_summarize_and_save(meeting_id: int, raw_transcript: str, meeting_name: s
     # stream of short notes doesn't become a stream of emails. Marking the
     # immediate ones as emailed is what keeps them out of that digest.
     if tag in IMMEDIATE_EMAIL_TAGS:
-        send_email(f"Meeting transcript: {meeting_name}", cleaned_markdown)
+        send_email(f"Meeting transcript: {title}", cleaned_markdown)
         store.mark_emailed([meeting_id])
-
-    # Regenerated from scratch every time this runs (initial upload, retry,
-    # or a retag that lands back on a to-do tag) so a resubmission can't
-    # leave duplicate or stale items behind.
-    build_memory_and_tasks(meeting_id, cleaned_markdown, tag)
 
     store.save_result(meeting_id, str(out_path))
 
@@ -752,6 +780,35 @@ def _do_memory_only(meeting_id: int):
         build_memory_and_tasks(meeting_id, note, meeting.get("tag") or DEFAULT_TAG)
 
 
+def _do_retitle(meeting_id: int):
+    """Regenerates only the friendly title of an already-finished note,
+    leaving its tasks, memory and completion state alone, and rewrites the
+    "# heading" in its markdown file to match. Failures are swallowed: a note
+    that can't be retitled keeps its old title rather than being marked
+    failed."""
+    try:
+        meeting = store.get(meeting_id)
+        body = _strip_title_heading(note_text(meeting) or "") if meeting else ""
+        if not body:
+            return
+        language = (f"Write it in {MEMORY_LANGUAGE}." if MEMORY_LANGUAGE
+                    else "Write it in the language of the note.")
+        prompt = (
+            "Give this voice note a friendly headline of 3-7 words, max 60 characters, "
+            "naming its actual subject (e.g. \"Portugal partnership cost discussion\"). "
+            f"No dates, quotes or trailing punctuation. {language} "
+            "Reply with the headline only.\n\nNote:\n---\n" + body[:6000] + "\n---\n"
+        )
+        title = llm_call(prompt).strip().splitlines()[0].strip(" \"'*#.")[:80]
+        if not title:
+            return
+        brain_store.set_title(meeting_id, title)
+        path = Path(meeting["transcript_path"])
+        path.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+    except Exception as e:
+        logging.warning(f"Retitle failed for meeting {meeting_id}: {e}")
+
+
 def _enqueue(job_kind: str, args: tuple):
     _job_queue.put((job_kind, args))
     logging.info(f"Queued '{job_kind}' job for meeting {args[0]} "
@@ -773,6 +830,8 @@ def _job_worker():
                 _do_summarize_only(*args)
             elif job_kind == "memory":
                 _do_memory_only(*args)
+            elif job_kind == "retitle":
+                _do_retitle(*args)
             logging.info(f"Finished '{job_kind}' job for meeting {meeting_id} in {time.monotonic() - start:.1f}s")
         except Exception as e:
             logging.error(f"'{job_kind}' job for meeting {meeting_id} failed after {time.monotonic() - start:.1f}s: {e}")
@@ -1013,6 +1072,8 @@ def wav_duration_seconds(wav_path: str) -> float | None:
 def meeting_matches_query(meeting: dict, query: str) -> bool:
     if query in meeting["meeting_name"].lower():
         return True
+    if query in (meeting.get("title") or "").lower():
+        return True
     if meeting["raw_transcript"] and query in meeting["raw_transcript"].lower():
         return True
     if meeting["transcript_path"]:
@@ -1185,7 +1246,7 @@ def download_transcript(meeting_id):
     if not path.exists():
         abort(404)
     return send_file(path, mimetype="text/markdown", as_attachment=True,
-                      download_name=f"{meeting['meeting_name']}.md")
+                      download_name=f"{safe_filename(display_title(meeting))}.md")
 
 
 def _add_bold_runs(paragraph, text):
@@ -1236,12 +1297,12 @@ def download_transcript_docx(meeting_id):
     if not path.exists():
         abort(404)
     markdown = path.read_text(encoding="utf-8")
-    buf = markdown_to_docx(markdown, meeting["meeting_name"])
+    buf = markdown_to_docx(markdown, display_title(meeting))
     return send_file(
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         as_attachment=True,
-        download_name=f"{meeting['meeting_name']}.docx",
+        download_name=f"{safe_filename(display_title(meeting))}.docx",
     )
 
 
@@ -1262,7 +1323,7 @@ def download_raw_transcript(meeting_id):
         abort(404)
     return meeting["raw_transcript"], 200, {
         "Content-Type": "text/plain; charset=utf-8",
-        "Content-Disposition": f'attachment; filename="{meeting["meeting_name"]}_raw.txt"',
+        "Content-Disposition": f'attachment; filename="{safe_filename(display_title(meeting))}_raw.txt"',
     }
 
 
@@ -1302,7 +1363,7 @@ def email_transcript(meeting_id):
         text = path.read_text(encoding="utf-8")
 
     try:
-        send_email_to(to_address, f"Meeting transcript: {meeting['meeting_name']}", text)
+        send_email_to(to_address, f"Meeting transcript: {display_title(meeting)}", text)
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         traceback.print_exc()
@@ -1375,6 +1436,7 @@ def note_summary(meeting: dict) -> dict:
     return {
         "id": meeting["id"],
         "name": meeting["meeting_name"],
+        "title": display_title(meeting),
         "tag": meeting["tag"] or DEFAULT_TAG,
         "recorded_at": recorded.isoformat() if recorded else None,
         "received_at": meeting["received_at"],
@@ -1440,6 +1502,7 @@ def todo_summary(todo: dict) -> dict:
         "done": bool(todo["done"]),
         "meeting_id": todo["meeting_id"],
         "meeting_name": todo["meeting_name"],
+        "meeting_title": todo.get("meeting_title") or todo["meeting_name"],
         "tag": todo["tag"],
         "created_at": todo["created_at"],
         "updated_at": todo["updated_at"],
@@ -1511,45 +1574,58 @@ def list_notes():
     return jsonify({"count": len(notes), "notes": notes})
 
 
-@app.route("/api/apple-shortcut/data", methods=["GET"])
+@app.route("/api/apple-shortcut/pending", methods=["GET"])
 @todos_read_token_required
-def apple_shortcut_data():
-    """Read-only payload for the Apple Notes and Reminders Shortcut."""
+def apple_shortcut_pending():
+    """Notes and open tasks not yet handed to the Apple Shortcut. Everything
+    returned is marked exported, so the next call only returns new items; pass
+    peek=1 to look without marking, or reset=1 to forget everything sent so
+    far and return it all again. Tasks with a due time come back in
+    dated_todos so the Shortcut can set a due date without any branching."""
+    if request.args.get("reset", "").strip() == "1":
+        store.clear_apple_exported()
+        todo_store.clear_apple_exported()
+
     notes = []
     for meeting in select_notes():
+        if meeting.get("apple_exported_at"):
+            continue
         content = note_text(meeting)
         if content is None:
             continue
-        note = note_summary(meeting)
-        note["content"] = content
-        notes.append(note)
-    todos = todo_store.list_all(done=False)
-    response = jsonify({
-        "notes": notes,
-        "todos": [todo_summary(todo) for todo in todos],
-    })
+        notes.append({
+            "id": meeting["id"],
+            # First line becomes the Apple Note's title. The file's own
+            # leading "# title" heading is dropped so it isn't shown twice.
+            "text": display_title(meeting) + "\n\n" + _strip_title_heading(content),
+        })
+    todos, dated_todos = [], []
+    for todo in todo_store.list_all(done=False):
+        if todo.get("apple_exported_at"):
+            continue
+        item = {"id": todo["id"], "text": todo["text"], "due_utc": todo.get("due_utc")}
+        (dated_todos if item["due_utc"] else todos).append(item)
+
+    if request.args.get("peek", "").strip() != "1":
+        store.mark_apple_exported(n["id"] for n in notes)
+        todo_store.mark_apple_exported(t["id"] for t in todos + dated_todos)
+
+    response = jsonify({"notes": notes, "todos": todos, "dated_todos": dated_todos})
     response.headers["Cache-Control"] = "private, no-store"
     return response
 
 
-@app.route("/apple-shortcut/download", methods=["GET"])
+@app.route("/apple-shortcut", methods=["GET"])
 @login_required
-def download_apple_shortcut():
-    """Download a personalized, unsigned .shortcut file for the logged-in user."""
-    if not TODOS_READ_TOKEN:
-        return jsonify({
-            "error": "Set TODOS_READ_TOKEN in the server .env before downloading the Shortcut."
-        }), 503
-    shortcut = build_shortcut(TODOS_READ_TOKEN)
-    response = send_file(
-        io.BytesIO(shortcut),
-        mimetype="application/x-apple-shortcut",
-        as_attachment=True,
-        download_name="AI-Meeting-Buddy-Sync.shortcut",
+def apple_shortcut_setup():
+    """Instructions for building the iPhone sync Shortcut. Apple only imports
+    signed shortcuts, which a Linux server can't produce, so the user builds
+    this short one by hand."""
+    return render_template(
+        "apple_shortcut.html",
+        pending_url=request.host_url.rstrip("/") + "/api/apple-shortcut/pending",
+        token=TODOS_READ_TOKEN,
     )
-    response.headers["Cache-Control"] = "private, no-store"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
 
 
 @app.route("/api/notes/<int:meeting_id>", methods=["GET"])
@@ -1572,7 +1648,7 @@ def get_note(meeting_id):
 
     headers = {"Content-Type": "text/markdown; charset=utf-8"}
     if request.args.get("download", "").strip() == "1":
-        headers["Content-Disposition"] = f'attachment; filename="{meeting["meeting_name"]}.md"'
+        headers["Content-Disposition"] = f'attachment; filename="{safe_filename(display_title(meeting))}.md"'
     return text, 200, headers
 
 
@@ -1600,7 +1676,7 @@ def download_notes():
             # Grouped by tag inside the zip, with the id in the filename so
             # two recordings sharing a name can't collide.
             tag_folder = m["tag"] or DEFAULT_TAG
-            entry = f"{tag_folder}/{m['meeting_name']}_{m['id']}.md"
+            entry = f"{tag_folder}/{safe_filename(display_title(m))}_{m['id']}.md"
             if entry in used_names:
                 continue
             used_names.add(entry)
@@ -1781,6 +1857,25 @@ def brain_backfill():
         if meeting:
             _enqueue("memory", (meeting_id,))
             queued += 1
+    return jsonify({"status": "ok", "queued": queued})
+
+
+@app.route("/api/brain/retitle", methods=["POST"])
+@upload_token_required
+def brain_retitle():
+    """One-off: queues a friendly-title regeneration for every completed,
+    unarchived note (pass missing=1 to only do notes with no title yet).
+    Title only - tasks and memory are untouched. Afterwards, hit
+    /api/apple-shortcut/pending?reset=1 to resend notes under new titles."""
+    only_missing = request.args.get("missing", "").strip() == "1"
+    queued = 0
+    for m in store.list_all():
+        if m["status"] != STATUS_COMPLETED or not m["transcript_path"]:
+            continue
+        if only_missing and (m.get("title") or "").strip():
+            continue
+        _enqueue("retitle", (m["id"],))
+        queued += 1
     return jsonify({"status": "ok", "queued": queued})
 
 
