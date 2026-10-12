@@ -156,28 +156,60 @@ void startToggleRecordFlow() {
 }
 
 void startSyncFlow() {
-  const int MAX_TRIES = 20;
+  state = STATE_SYNC;
+  const int MAX_TRIES = 24;
+
+  Serial.println("\n[Sync] Starting sync flow...");
   showWifiConnecting(0, MAX_TRIES);
 
+  Serial.println("[Sync] Setting WiFi to STA mode");
+  WiFi.mode(WIFI_STA);
+
+  Serial.println("[Sync] Beginning WiFi connection");
   settingsWifiBegin();
+
   int tries = 0;
   while (WiFi.status() != WL_CONNECTED && tries < MAX_TRIES) {
-    delay(500); tries++;
+    delay(1000);  // Give WiFi 1 second per attempt
+    tries++;
+    Serial.printf("[WiFi] Attempt %d/%d, status=%d\n", tries, MAX_TRIES, (int)WiFi.status());
     showWifiConnecting(tries, MAX_TRIES);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    syncTimeFromNTP(6000);
+    Serial.println("[WiFi] Connected!");
+    Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WiFi] RSSI: %d dBm\n", WiFi.RSSI());
+
+    Serial.println("[Sync] Waiting for TCP/IP stack...");
+    delay(3000);  // Give TCP/IP stack extra time to initialize
+
+    Serial.println("[Sync] Starting NTP time sync...");
+    bool timeSynced = syncTimeFromNTP(10000);
+    if (!timeSynced) {
+      Serial.println("[Sync] NTP failed - proceeding anyway (may fail if time needed)");
+    }
+
+    Serial.println("[Sync] Waiting before upload...");
+    delay(3000);  // Extra time before HTTPS operations
+    Serial.println("[Sync] Starting transcribe...");
     transcribeAll();
+
+    Serial.println("[Sync] Loading index...");
     loadIndex();
-    WiFi.disconnect(true);
+
+    Serial.println("[Sync] Complete!");
     showDone();
     soundSuccess();
     delay(1600);
   } else {
+    Serial.printf("[WiFi] Connection failed after %d attempts\n", tries);
     showError("NO WIFI");
     delay(1800);
   }
+
+  Serial.println("[Sync] Disconnecting WiFi");
+  WiFi.disconnect(true);
 
   if (wakeToMenuRequested) {
     menuCursor = 0;
@@ -292,7 +324,7 @@ void setup() {
 // ─── Main loop ────────────────────────────────────────────────────────────
 void loop() {
 
-  if (state != STATE_RECORDING && state != STATE_TRANSFER) {
+  if (state != STATE_RECORDING && state != STATE_TRANSFER && state != STATE_SYNC) {
     if (millis() - lastActivityMs > ULTRA_SLEEP_MS) {
       enterUltraSleep();
       return;
@@ -300,7 +332,7 @@ void loop() {
   }
 
   ButtonEvent pwrEvent = EV_NONE;
-  if (state != STATE_RECORDING && state != STATE_TRANSFER) {
+  if (state != STATE_RECORDING && state != STATE_TRANSFER && state != STATE_SYNC) {
     pwrEvent = readButtonEvent(BTN_PWR);
     if (pwrEvent == EV_LONG) {
       enterUltraSleep();

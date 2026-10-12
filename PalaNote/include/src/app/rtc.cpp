@@ -105,7 +105,11 @@ String rtcUtcIso() {
 }
 
 bool syncTimeFromNTP(uint32_t timeoutMs) {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[NTP] WiFi not connected");
+    return false;
+  }
+  Serial.printf("[NTP] Starting sync (timeout %u ms)\n", timeoutMs);
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
   uint32_t start = millis();
   struct tm timeinfo;
@@ -113,6 +117,9 @@ bool syncTimeFromNTP(uint32_t timeoutMs) {
     if (getLocalTime(&timeinfo, 500)) {
       time_t now = time(nullptr);
       if (now > 1700000000) {
+        char buf[32];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &timeinfo);
+        Serial.printf("[NTP] Synced: %s\n", buf);
         timeReady = true;
         rtcSyncChipFromSystem();
         return true;
@@ -120,5 +127,6 @@ bool syncTimeFromNTP(uint32_t timeoutMs) {
     }
     delay(100);
   }
+  Serial.printf("[NTP] Failed (timeout after %u ms)\n", timeoutMs);
   return false;
 }

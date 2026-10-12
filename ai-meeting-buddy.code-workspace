@@ -1,0 +1,57 @@
+{
+    "folders": [
+        { "path": "server" },
+        { "path": "mcp-server" },
+        { "path": "m5sticks3" },
+        { "path": "PalaNote" }
+    ],
+    "tasks": {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "Server: deploy",
+                "type": "shell",
+                "command": "./deploy.ps1 deploy",
+                "options": { "cwd": "${workspaceFolder:server}" },
+                "problemMatcher": []
+            },
+            {
+                "label": "Server: deploy (full rebuild)",
+                "type": "shell",
+                "command": "./deploy.ps1 deploy --full",
+                "options": { "cwd": "${workspaceFolder:server}" },
+                "problemMatcher": []
+            },
+            {
+                "label": "M5StickS3: build",
+                "type": "shell",
+                "command": "pio run -e m5sticks3",
+                "options": { "cwd": "${workspaceFolder:m5sticks3}" },
+                "problemMatcher": ["$platformio"],
+                "group": "build"
+            },
+            {
+                "label": "M5StickS3: build + upload",
+                "type": "shell",
+                "command": "pio run -e m5sticks3 -t upload",
+                "options": { "cwd": "${workspaceFolder:m5sticks3}" },
+                "problemMatcher": ["$platformio"]
+            },
+            {
+                "label": "PalaNote: build",
+                "type": "shell",
+                "command": "pio run -e waveshare_esp32s3_eink",
+                "options": { "cwd": "${workspaceFolder:PalaNote}" },
+                "problemMatcher": ["$platformio"],
+                "group": "build"
+            },
+            {
+                "label": "PalaNote: build + upload",
+                "type": "shell",
+                "command": "pio run -e waveshare_esp32s3_eink -t upload",
+                "options": { "cwd": "${workspaceFolder:PalaNote}" },
+                "problemMatcher": ["$platformio"]
+            }
+        ]
+    }
+}

@@ -14,6 +14,7 @@ typedef enum {
   STATE_SETTINGS,
   STATE_DEVICE_INFO,
   STATE_TRANSFER,
+  STATE_SYNC,
   STATE_ERROR
 } AppState;
 

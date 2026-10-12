@@ -13,6 +13,8 @@
 #include "esp_heap_caps.h"
 #include "../../secrets.h"
 
+#define NETWORK_LOG(...) do { Serial.printf("[%lu ms] ", (unsigned long)millis()); Serial.printf(__VA_ARGS__); } while (0)
+
 static String parseWhisperText(const String& resp) {
   int s = resp.indexOf("\"text\":\"");
   if (s < 0) return "";
@@ -106,12 +108,39 @@ static WiFiClient* openServerConn() {
   // seconds here left every read with a 20ms budget, so a server that took
   // even a moment to answer looked like a dead connection.
   if (u.tls) {
+    NETWORK_LOG("[TLS] Connecting to %s:%d (timeReady=%d)\n", u.host.c_str(), u.port, timeReady ? 1 : 0);
+
     WiFiClientSecure* sc = new WiFiClientSecure();
     sc->setInsecure();
-    sc->setTimeout(UPLOAD_HTTP_TO_MS);
-    if (!sc->connect(u.host.c_str(), u.port)) { delete sc; return nullptr; }
-    return sc;
+    sc->setTimeout(5000);  // 5 second timeout for connection attempts (faster fail)
+
+    // Retry logic with proper cleanup
+    for (int attempt = 0; attempt < 3; attempt++) {
+      uint32_t connectStarted = millis();
+      if (sc->connect(u.host.c_str(), u.port)) {
+        NETWORK_LOG("[TLS] Connected in %lu ms\n", (unsigned long)(millis() - connectStarted));
+        sc->setTimeout(UPLOAD_HTTP_TO_MS);  // Use full timeout for data operations
+        yield();
+        return sc;
+      }
+
+      NETWORK_LOG("[TLS] Connection attempt %d failed after %lu ms\n", attempt + 1,
+          (unsigned long)(millis() - connectStarted));
+
+      if (attempt < 2) {
+        NETWORK_LOG("[TLS] Retrying connection\n");
+        sc->stop();
+        yield();
+        delay(500);  // Quick retry
+      }
+    }
+
+    NETWORK_LOG("[TLS] All connection attempts failed\n");
+    sc->stop();
+    delete sc;
+    return nullptr;
   }
+
   WiFiClient* pc = new WiFiClient();
   pc->setTimeout(UPLOAD_HTTP_TO_MS);
   if (!pc->connect(u.host.c_str(), u.port)) { delete pc; return nullptr; }
@@ -125,6 +154,7 @@ static bool readPlainResponse(WiFiClient& client, int& httpCode, String& body) {
   httpCode = 0;
   body = "";
   uint32_t deadline = millis() + UPLOAD_HTTP_TO_MS;
+  int contentLength = -1;
 
   String statusLine = "";
   while (millis() < deadline) {
@@ -141,7 +171,7 @@ static bool readPlainResponse(WiFiClient& client, int& httpCode, String& body) {
   if (sp < 0) return false;
   httpCode = statusLine.substring(sp + 1, sp + 5).toInt();
 
-  bool inBody = false;
+  bool headersDone = false;
   while (millis() < deadline) {
     if (!client.available()) {
       if (!client.connected()) break;
@@ -149,16 +179,29 @@ static bool readPlainResponse(WiFiClient& client, int& httpCode, String& body) {
       continue;
     }
     String line = client.readStringUntil('\n');
-    if (!inBody) {
-      line.trim();
-      if (line.length() == 0) inBody = true;
-    } else {
-      body += line;
-      if (body.length() > 256) break;   // responses here are tiny
+    line.trim();
+    if (line.length() == 0) {
+      headersDone = true;
+      break;
     }
+    line.toLowerCase();
+    if (line.startsWith("content-length:")) contentLength = line.substring(15).toInt();
   }
+  if (!headersDone) return false;
+
+  while (millis() < deadline && (contentLength < 0 || body.length() < contentLength)) {
+    if (client.available()) {
+      int c = client.read();
+      if (c >= 0) body += (char)c;
+      if (body.length() >= 256) break;   // responses here are tiny
+      continue;
+    }
+    if (!client.connected()) break;
+    delay(2);
+  }
+  bool bodyComplete = contentLength < 0 || body.length() == contentLength;
   body.trim();
-  return true;
+  return bodyComplete;
 }
 
 // The device's filename for a note, which is also the server-side key for
@@ -200,11 +243,27 @@ static long serverOffsetFor(const String& fileName) {
   WiFiClient* client = openServerConn();
   if (!client) return -1;
 
-  client->printf("GET %s/upload/status?name=%s HTTP/1.1\r\n"
-                 "Host: %s\r\n"
-                 "X-Upload-Token: %s\r\n"
-                 "Connection: close\r\n\r\n",
-                 u.base.c_str(), fileName.c_str(), u.host.c_str(), UPLOAD_TOKEN);
+  // Verify socket is ready before writing
+  if (!client->connected()) {
+    Serial.println("[Upload] Socket not connected after openServerConn()");
+    delete client;
+    return -1;
+  }
+
+  Serial.printf("[Upload] Querying offset for %s\n", fileName.c_str());
+  size_t written = client->printf("GET %s/upload/status?name=%s HTTP/1.1\r\n"
+                                  "Host: %s\r\n"
+                                  "X-Upload-Token: %s\r\n"
+                                  "Connection: close\r\n\r\n",
+                                  u.base.c_str(), fileName.c_str(), u.host.c_str(), UPLOAD_TOKEN);
+  Serial.printf("[Upload] HTTP write returned: %u bytes\n", written);
+
+  if (written == 0) {
+    Serial.println("[Upload] Failed to send HTTP request");
+    client->stop();
+    delete client;
+    return -1;
+  }
 
   int code; String body;
   bool ok = readPlainResponse(*client, code, body);
@@ -230,17 +289,33 @@ static bool sendChunk(const String& fileName, File& f, size_t offset,
   WiFiClient* client = openServerConn();
   if (!client) return false;
 
-  client->printf("POST %s/upload/chunk HTTP/1.1\r\n"
-                 "Host: %s\r\n"
-                 "X-Upload-Token: %s\r\n"
-                 "X-File-Name: %s\r\n"
-                 "X-Chunk-Offset: %u\r\n"
-                 "X-Upload-Final: %s\r\n"
-                 "Content-Type: application/octet-stream\r\n"
-                 "Content-Length: %u\r\n"
-                 "Connection: close\r\n\r\n",
-                 u.base.c_str(), u.host.c_str(), UPLOAD_TOKEN, fileName.c_str(),
-                 (unsigned)offset, isFinal ? "1" : "0", (unsigned)len);
+  // Verify socket is ready before writing
+  if (!client->connected()) {
+    Serial.println("[Upload] Socket not connected after openServerConn()");
+    delete client;
+    return false;
+  }
+
+  size_t written = client->printf("POST %s/upload/chunk HTTP/1.1\r\n"
+                                  "Host: %s\r\n"
+                                  "X-Upload-Token: %s\r\n"
+                                  "X-File-Name: %s\r\n"
+                                  "X-Chunk-Offset: %u\r\n"
+                                  "X-Upload-Final: %s\r\n"
+                                  "Content-Type: application/octet-stream\r\n"
+                                  "Content-Length: %u\r\n"
+                                  "Connection: close\r\n\r\n",
+                                  u.base.c_str(), u.host.c_str(), UPLOAD_TOKEN, fileName.c_str(),
+                                  (unsigned)offset, isFinal ? "1" : "0", (unsigned)len);
+
+  NETWORK_LOG("[Upload] Chunk headers write: %u bytes\n", written);
+
+  if (written == 0) {
+    Serial.println("[Upload] Failed to send chunk headers");
+    client->stop();
+    delete client;
+    return false;
+  }
 
   if (!f.seek(offset)) { client->stop(); delete client; return false; }
 
@@ -252,16 +327,32 @@ static bool sendChunk(const String& fileName, File& f, size_t offset,
   // long to sit inside a single fixed deadline.
   size_t sent = 0;
   bool writeOk = true;
+  uint32_t chunkStarted = millis();
   uint32_t lastProgress = millis();
   while (sent < len) {
     if (!client->connected() || (millis() - lastProgress) > UPLOAD_STALL_TO_MS) {
+      NETWORK_LOG("[Upload] Body write stopped at %u/%u bytes after %lu ms (connected=%d)\n",
+                  (unsigned)sent, (unsigned)len, (unsigned long)(millis() - chunkStarted),
+                  client->connected() ? 1 : 0);
       writeOk = false;
       break;
     }
     size_t want = min((size_t)1024, len - sent);
     int n = f.read(buf, want);
-    if (n <= 0) { writeOk = false; break; }
-    if (client->write(buf, n) != (size_t)n) { writeOk = false; break; }
+    if (n <= 0) {
+      NETWORK_LOG("[Upload] SD read failed at %u/%u bytes after %lu ms\n",
+                  (unsigned)sent, (unsigned)len, (unsigned long)(millis() - chunkStarted));
+      writeOk = false;
+      break;
+    }
+    size_t bytesWritten = client->write(buf, n);
+    if (bytesWritten != (size_t)n) {
+      NETWORK_LOG("[Upload] TLS body write returned %u/%d bytes at %u/%u after %lu ms\n",
+                  (unsigned)bytesWritten, n, (unsigned)sent, (unsigned)len,
+                  (unsigned long)(millis() - chunkStarted));
+      writeOk = false;
+      break;
+    }
     sent += n;
     lastProgress = millis();
     yield();   // let WiFi/lwIP and the task watchdog run between buffers
@@ -271,8 +362,13 @@ static bool sendChunk(const String& fileName, File& f, size_t offset,
   // server-side anyway, so don't wait on a response we can't trust.
   if (!writeOk || sent != len) { client->stop(); delete client; return false; }
 
+  NETWORK_LOG("[Upload] Sent %u-byte chunk body in %lu ms; waiting for response\n",
+              (unsigned)sent, (unsigned long)(millis() - chunkStarted));
+  uint32_t responseStarted = millis();
   int code; String body;
   bool ok = readPlainResponse(*client, code, body);
+  NETWORK_LOG("[Upload] Chunk response read in %lu ms (ok=%d, code=%d)\n",
+              (unsigned long)(millis() - responseStarted), ok ? 1 : 0, code);
   client->stop();
   delete client;
   if (!ok) return false;
@@ -454,6 +550,11 @@ static bool uploadToServer(const String& wavPath, int noteNum, const char* devic
         return false;
       }
       if (complete) break;
+
+      // Show progress on display (percentage of file uploaded)
+      int percent = (fileSize > 0) ? (int)(((long)offset * 100) / fileSize) : 0;
+      Serial.printf("[Upload] note %d: %d%% (%ld/%u bytes)\n", noteNum, percent, offset, (unsigned)fileSize);
+
       continue;
     }
 
@@ -462,10 +563,12 @@ static bool uploadToServer(const String& wavPath, int noteNum, const char* devic
       f.close();
       return false;
     }
+    NETWORK_LOG("[Upload] Retry %d/%d for note %d at offset %ld after chunk failure\n",
+                retries, UPLOAD_MAX_RETRIES, noteNum, offset);
     // A short-write rejection (400) hands back the offset the server really
     // has; trust it over ours.
     if (serverBytes >= 0) offset = serverBytes;
-    delay(1000);
+    delay(250);
   }
   f.close();
 
@@ -695,37 +798,38 @@ bool transcribe(const String& wavPath, int noteNum) {
 // Whisper and the AI cleanup, so the text is not available yet - the note is
 // marked uploaded here and its markdown is fetched by a later sync.
 bool syncNote(const String& wavPath, int noteNum, const char* deviceTag) {
+  Serial.printf("[Sync] Processing note %d (%s)\n", noteNum, wavPath.c_str());
   bool reachable = true;
   if (uploadToServer(wavPath, noteNum, deviceTag, &reachable)) {
+    Serial.printf("[Sync] Note %d uploaded successfully\n", noteNum);
     markNoteUploaded(noteNum);
     return true;
   }
   if (reachable) {
-    // The server answered but the transfer didn't finish (a dropped link
-    // mid-upload, or a chunk that kept failing). Whatever did land is still
-    // on the server as a .part and the next sync resumes from there, so
-    // leave the note pending instead of sending the audio to OpenAI - the
-    // fallback exists for "no server at all", not for a bad connection.
-    Serial.printf("[Sync] note %d: upload incomplete, staying pending for next sync\n", noteNum);
+    Serial.printf("[Sync] Note %d: upload incomplete, staying pending for next sync\n", noteNum);
     return false;
   }
-  Serial.printf("[Sync] note %d: server unreachable, falling back to OpenAI\n", noteNum);
+  Serial.printf("[Sync] Note %d: server unreachable, falling back to OpenAI\n", noteNum);
   return transcribe(wavPath, noteNum);
 }
 
 void transcribeAll() {
   int pending = 0;
   for (int i=0; i<(int)noteIndex.size(); i++) if(!noteIndex[i].uploaded) pending++;
+  Serial.printf("[Transcribe] Found %d pending notes to sync\n", pending);
+
   int done = 0;
   for (int i=0; i<(int)noteIndex.size(); i++) {
     if (noteIndex[i].uploaded) continue;
     showTranscribing(done, pending);
     char wp[64]; snprintf(wp, sizeof(wp), "%s/note_%03d.wav", NOTES_DIR, noteIndex[i].num);
     if (syncNote(String(wp), noteIndex[i].num, noteIndex[i].tag)) done++;
+    Serial.printf("[Transcribe] Progress: %d/%d synced\n", done, pending);
   }
-  // Then collect the processed markdown for anything the server has finished
-  // since - including notes uploaded during an earlier sync.
-  fetchProcessedNotes();
+
+  Serial.println("[Transcribe] Fetching processed notes...");
+  int fetched = fetchProcessedNotes();
+  Serial.printf("[Transcribe] Fetched %d processed notes\n", fetched);
 }
 
 // ─── Portal helpers ────────────────────────────────────────────────────────
